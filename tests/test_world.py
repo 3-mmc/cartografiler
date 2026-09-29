@@ -225,6 +225,45 @@ class WorldTests(unittest.TestCase):
         finally:
             world.store.close()
 
+    def test_a_big_town_renders_at_every_zoom(self):
+        # A town past CITY_MIN files grows a city centre, and its lots take heights; tiles over
+        # it must render at every level (a clobbered variable once broke exactly this).
+        from branchfm.tiles import BLOCK, CITY_MIN, TOWER
+        town = self.tree/'town'
+        town.mkdir()
+        for i in range(CITY_MIN+15):
+            (town/f'module_{i:02d}.py').write_text('x = 1\n'*(i+1))
+        survey(self.index, self.tree)
+        world = World(self.index)
+        try:
+            synth = Synth(world)
+            t = world.territory_for(str(town))
+            cx, cy = t.x0+t.size/2, t.y0+t.size/2
+            tall = 0
+            for level in range(max(0, int(np.floor(np.log2(1/t.size)))-2), int(np.floor(np.log2(1/t.size)))+6):
+                S = 0.5**level
+                inst = synth.tile(level, int(cx/S), int(cy/S))['instances']
+                tall += int(np.isin(inst['kind'], (BLOCK, TOWER)).sum())
+            self.assertGreater(tall, 0)
+        finally:
+            world.store.close()
+
+    def test_no_sea_walls_at_the_coast(self):
+        # Every land-only height term must fade to nothing at the shoreline (the fractal detail
+        # once stood as a wall a tenth of a tile high along every coast).
+        from branchfm.world import SEA, OUT
+        root = self.world.root()
+        xs = np.linspace(0.5, 0.99, 4000)
+        lab, _ = label_at(root, xs, np.full(xs.size, 0.5), 1e-5)
+        sea = (lab == SEA) | (lab == OUT)
+        cx = float(xs[np.argmax(sea)])
+        synth = Synth(self.world)
+        for level in (5, 7, 9):
+            S = 0.5**level
+            h = synth.tile(level, int(cx/S), int(0.5/S))['height']
+            slope = max(np.abs(np.diff(h, axis=0)).max(), np.abs(np.diff(h, axis=1)).max())/(S/(N-1))
+            self.assertLess(slope, 20.0, f'level {level}')
+
     def test_continents_end_in_deltas(self):
         root = self.world.root()
         self.assertTrue(any('delta' in lake for lake in root.lakes) or root.mouth is None)

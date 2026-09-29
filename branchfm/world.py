@@ -35,7 +35,7 @@ from scipy.spatial import cKDTree
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
-LAYOUT_VERSION = 13          # bump when the layout changes shape, so cached territories are redone
+LAYOUT_VERSION = 16          # bump when the layout changes shape, so cached territories are redone
 
 # ---------------------------------------------------------------- hashing & noise
 
@@ -230,6 +230,8 @@ class Territory:
     falls: bool = False              # its river falls at the outlet (ground changes)
     lakes: list = field(default_factory=list)
     uniform: str | None = None       # a library: most subfolders are made of this one kind
+    members: set = field(default_factory=set)             # library members (labels)
+    library_dist: np.ndarray | None = None                # raster distance to the library's edge
     repo: bool = False               # holds a .git: a walled town with a keep
     slot: bool = False               # holds exactly one folder and nothing else: a slot canyon
 
@@ -1028,6 +1030,15 @@ class World:
                       version=self.index.version)
         t.child_by_label = {c['label']: c for c in children}
         t.uniform = self._uniform(children)
+        if t.uniform:
+            # The library as one massif: distance (cells) to its edge, where members give way to
+            # anything else, so the range rises from its foothills without a cliff.
+            members = {c['label'] for c in children if dominant_kind(c['kinds'], c.get('kind_bytes'))[0] == t.uniform}
+            t.members = members
+            # The whole library is the massif (a documents author in a PDF library still stands
+            # on the range); only the members carry summits.
+            inside = labels >= FIRST_CHILD
+            t.library_dist = ndimage.distance_transform_edt(inside).astype(np.float32)
         # A git repository is a walled town; a folder holding only one folder is a slot canyon.
         t.repo = any(r['name'] == '.git' for r in subdirs)
         t.slot = parent is not None and len(subdirs) == 1 and not files
@@ -1160,6 +1171,14 @@ class World:
                               'r': 0.012*side*min(1.0, math.sqrt(len(t.children)/40)), 'seed': stable_hash(t.path+'lake')})
         # Ridges part where rivers run: distance to the main channels, in cells.
         t.river_dist = ndimage.distance_transform_edt(~river_cells.reshape(n, n)).astype(np.float32) if river_cells.any() else None
+        if t.slot and t.outlet is not None and t.children:
+            # A slot canyon: a folder holding only one folder. One gorge runs from where the
+            # water leaves to the heart of the place; down a chain of such folders the gorges
+            # line up into one deep, narrow canyon.
+            c = t.children[0]
+            pts = _meander(t.outlet, c['centroid'], stable_hash(t.path+'gorge'), 0.22, 16)
+            gw = 0.03*side
+            rivers.append({'pts': pts, 'w': np.linspace(gw, gw*0.6, len(pts)), 'kind': 'gorge', 'child': None})
         for c in ([] if t.uniform else t.children):
             # Each subfolder's own course, drawn until that place shows its own network.
             wc = 0.02*c['side']

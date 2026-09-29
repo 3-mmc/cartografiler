@@ -9,9 +9,10 @@ const INSTANCE_SHADER = preload("res://instances.gdshader")
 const MODELS = preload("res://models.gd")
 # Fixed (untinted) colour per model (MODEL_NAMES in branchfm/tiles.py): trunks, walls, stone.
 const MODEL_FIXED = [Color(0.30, 0.24, 0.18), Color(0.28, 0.22, 0.16), Color(0.80, 0.76, 0.68), Color(0.5, 0.48, 0.45),
-	Color(0.45, 0.36, 0.26), Color(0.36, 0.5, 0.3), Color(0.3, 0.26, 0.2), Color(0.28, 0.22, 0.16), Color(0.86, 0.82, 0.74),
+	Color(0.45, 0.36, 0.26), Color(0.36, 0.5, 0.3), Color(0.3, 0.26, 0.2), Color(0.28, 0.22, 0.16), Color(0.78, 0.66, 0.5),
 	Color(0.55, 0.5, 0.46), Color(0.62, 0.62, 0.6), Color(0.8, 0.79, 0.76), Color(0.6, 0.58, 0.56), Color(0.62, 0.58, 0.52),
-	Color(0.84, 0.78, 0.66), Color(0.6, 0.57, 0.52), Color(0.95, 0.96, 0.96), Color(0.7, 0.66, 0.58), Color(0.7, 0.46, 0.3)]
+	Color(0.84, 0.78, 0.66), Color(0.86, 0.8, 0.66), Color(0.95, 0.96, 0.96), Color(0.7, 0.66, 0.58), Color(0.78, 0.66, 0.52),
+	Color(0.84, 0.82, 0.78), Color(0.7, 0.72, 0.74), Color(0.86, 0.8, 0.66)]
 const STEAM_MODEL = 16
 const FOV = 38.0                # horizontal field of view in perspective
 const SERIF = preload("res://fonts/Cartography.ttf")
@@ -697,7 +698,8 @@ func build_models(body: PackedByteArray, offset: int) -> Array:
 			var o = rows[i]
 			var s = body.decode_float(o+12)
 			var yaw = body[o+17]/256.0*TAU
-			var basis = Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
+			var tall = maxf(1.0, body[o+21]/32.0)   # building height factor (city centres)
+			var basis = Basis(Vector3.UP, yaw).scaled(Vector3(s, s*tall, s))
 			mm.set_instance_transform(i, Transform3D(basis, Vector3(body.decode_float(o), body.decode_float(o+8), body.decode_float(o+4))))
 			mm.set_instance_color(i, Color8(body[o+18], body[o+19], body[o+20]))
 		var mmi = MultiMeshInstance3D.new()
@@ -1377,13 +1379,13 @@ Every folder's water leaves at its outlet and runs down the valleys between prov
 A folder's own files lie as fields: each kind is one patch (a forest of images, a field system of tables, a town of source files) and each file one parcel of it, in alphabetical order across the patch. Far off, a patch is one colour; closer, it divides into fields with hedgerows, city blocks with streets, the peaks of a massif (PDFs, rock by age), a crevassed glacier (archives), mesas of banded strata (video), reed beds and pools (audio), obsidian flows (executables), calderas (disk images), flowering meadow (documents) and scrub with cairns (anything else).
 
 [color=#d9c68f][b]Buildings are roles[/b][/color]
-Houses are source files, built in their language's style (Python terracotta, JavaScript white flat roofs, C slate, Rust rust-red, Go blue). A town hall stands for a project's manifest, a walled town with a keep for a git repository, factories for build output, warehouses for vendored dependencies, silos for databases, power stations for AI model weights. Code untouched for three years stands in ruins.
+A big town of code is a city, tallest at its centre. Houses are source files, built in their language's style (Python terracotta, JavaScript white flat roofs, C slate, Rust rust-red, Go blue). A town hall stands for a project's manifest, a walled town with a keep for a git repository, factories for build output, warehouses for vendored dependencies, silos for databases, power stations for AI model weights. Code untouched for three years stands in ruins.
 
 [color=#d9c68f][b]Trees are the climate[/b][/color]
-Broadleaf woods on Linux, jungle and palms on Windows drives, conifers where you cannot write, cacti on virtual filesystems. Camera originals (RAW) grow as old oaks, screenshots as shrubs; photographs turn autumnal after a year.
+Broadleaf woods on Linux, jungle and palms on Windows drives, conifers where you cannot write. Virtual filesystems (/proc, /sys) are a volcanic wasteland: the kernel's live state, remade every moment. Camera originals (RAW) grow as old oaks, screenshots as shrubs; photographs turn autumnal after a year.
 
 [color=#d9c68f][b]Landforms[/b][/color]
-Geysers: files changed in the last 15 minutes. Volcano: most of a folder changed this week. Salt flat: an empty folder. Fenced ground: a folder that could not be read. Slot canyon: a chain of folders each holding one folder. Natural arch: a link. Monument: the largest file on each disk.
+Geysers: files changed in the last 15 minutes. Volcano: most of a folder changed this week. Salt flat: an empty folder. Fenced ground: a folder that could not be read. Slot canyon: a folder holding only one folder. PDF and film libraries rise as one range or tableland, their members its summits and mesas. Natural arch: a link. Monument: the largest file on each disk.
 
 [color=#d9c68f][b]Rock is age, snow is dormancy[/b][/color]
 Ridgelines show the age of their region: dark basalt when changed recently, sandstone within three years, pale granite when old. Regions untouched for over two years are snowbound.
@@ -1575,13 +1577,17 @@ func paste():
 # ---------------------------------------------------------------- smoke test
 
 func wait_for_terrain(limit_ms: int):
+	# Complete and settled: every wanted tile loaded for three checks in a row, with the camera
+	# still (the wanted set changes while a flight or the height reference is settling).
 	var started = Time.get_ticks_msec()
+	var steady = 0
 	while Time.get_ticks_msec()-started < limit_ms:
 		await get_tree().create_timer(0.5).timeout
 		var loaded = 0
 		for key in wanted:
 			if tiles.has(key) and not tiles[key].get("loading", false): loaded += 1
-		if loaded == wanted.size() and loaded > 0: return
+		steady = steady+1 if loaded == wanted.size() and loaded > 0 and not flying else 0
+		if steady >= 3: return
 
 func _smoke_test():
 	var args = OS.get_cmdline_user_args()

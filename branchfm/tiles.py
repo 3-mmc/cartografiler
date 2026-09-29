@@ -40,7 +40,9 @@ CLIMATE = {
     'native':    {'meadow': (122, 128, 94),  'dry': (146, 142, 112), 'forest': (72, 88, 64),  'field': (150, 146, 106), 'shore': (190, 182, 152)},
     'windows':   {'meadow': (108, 122, 84),  'dry': (134, 136, 100), 'forest': (60, 82, 56),  'field': (146, 144, 98),  'shore': (192, 184, 150)},
     'network':   {'meadow': (110, 120, 100), 'dry': (126, 130, 110), 'forest': (66, 82, 70),  'field': (132, 136, 110), 'shore': (170, 170, 150)},
-    'ephemeral': {'meadow': (184, 170, 136), 'dry': (198, 184, 148), 'forest': (146, 136, 100), 'field': (190, 172, 132), 'shore': (208, 196, 164)},
+    # Virtual filesystems (/proc, /sys) are the kernel's live state, remade every moment: a
+    # volcanic wasteland of ash and cinder cones.
+    'ephemeral': {'meadow': (92, 84, 80), 'dry': (106, 96, 88), 'forest': (70, 64, 62), 'field': (98, 88, 80), 'shore': (120, 110, 100)},
     'alpine':    {'meadow': (136, 138, 128), 'dry': (152, 152, 144), 'forest': (84, 96, 84),  'field': (146, 146, 132), 'shore': (178, 176, 168)},
 }
 # Rock by age: basalt, weathered basalt, sandstone, granite, all muted.
@@ -76,9 +78,13 @@ KIND_CODE = {k: i for i, k in enumerate(KIND_NAMES)}
 SYMBOL_KINDS = ('video', 'pdf', 'images', 'archives', 'audio', 'code')
 # 3D instances the client draws (native/models.gd builds the meshes, in this order).
 MODEL_NAMES = ('broadleaf', 'conifer', 'house', 'boulder', 'palm', 'cactus', 'shrub', 'oak', 'flat_house', 'factory',
-               'warehouse', 'silo', 'power_station', 'ruin', 'town_hall', 'keep', 'steam', 'obelisk', 'arch')
+               'warehouse', 'silo', 'power_station', 'ruin', 'town_hall', 'keep', 'steam', 'obelisk', 'arch', 'block', 'tower',
+               'wall_tower')
 (BROADLEAF, CONIFER, HOUSE, BOULDER, PALM, CACTUS, SHRUB, OAK, FLAT, FACTORY, WAREHOUSE, SILO, POWER, RUIN, HALL,
- KEEP, STEAM, OBELISK, ARCH) = range(len(MODEL_NAMES))
+ KEEP, STEAM, OBELISK, ARCH, BLOCK, TOWER, WALL_TOWER) = range(len(MODEL_NAMES))
+CITY_MIN = 25                   # a town of at least this many files grows a city centre
+# Rows of self._lots: x, y, size, yaw, r, g, b, model, height factor.
+LOT_COLUMNS = 9
 SP = 3                          # instance grid spacing, in tile samples
 ROLE_CODE = {'': 0, 'house': 1, 'depot': 2, 'factory': 3, 'silo': 4, 'power': 5, 'hall': 6, 'arch': 7, 'oak': 8, 'shrub': 9}
 # Architecture is the language: a Python town has terracotta gables, a JavaScript town white
@@ -86,7 +92,7 @@ ROLE_CODE = {'': 0, 'house': 1, 'depot': 2, 'factory': 3, 'silo': 4, 'power': 5,
 LANG_STYLE = {}
 for _exts, _model, _roof in (
         (('.py', '.pyi', '.ipynb'), 'house', (168, 92, 64)),
-        (('.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '.vue', '.svelte'), 'flat_house', (226, 220, 204)),
+        (('.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '.vue', '.svelte'), 'flat_house', (206, 198, 180)),
         (('.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hh'), 'house', (96, 104, 116)),
         (('.rs',), 'house', (140, 72, 52)),
         (('.go',), 'flat_house', (120, 150, 170)),
@@ -109,6 +115,8 @@ INSTANCE = np.dtype([('u', '<f4'), ('v', '<f4'), ('h', '<f4'), ('s', '<f4'), ('k
 # slate, limestone, weathered); database towns are slate-blue.
 CROPS = np.array([(176, 160, 92), (128, 142, 74), (96, 116, 62), (132, 106, 78), (164, 152, 112)], dtype=np.float64)
 ROOFS = np.array([(152, 98, 78), (124, 122, 120), (170, 158, 140), (112, 104, 96)], dtype=np.float64)
+# City centres: stone, brick, glass and concrete.
+CITY_TINTS = np.array([(172, 164, 150), (150, 110, 88), (118, 136, 152), (190, 184, 172), (136, 128, 120)], dtype=np.float64)
 ROOFS_DB = np.array([(104, 114, 128), (124, 130, 140), (92, 100, 112), (146, 150, 156)], dtype=np.float64)
 
 
@@ -271,7 +279,7 @@ class Synth:
                             # each member stands as one landform of the library's kind.
                             inland = np.zeros(k.size, dtype=bool)
                             show = 0
-                            self._library_symbols(T, k, b, sc, pk[relief], seed_l[inv[relief]], inv[relief], entries, f, xs, ys, px, H, symbol)
+                            self._library_symbols(T, k, b, sc, pk[relief], seed_l[inv[relief]], inv[relief], entries, f, xs, ys, px, H, symbol, typical)
                         if show > 0:
                             dots = (self.G.value(0.25/px, 77)[k] > 0.45)
                             border_line[k] = np.maximum(border_line[k], np.clip(1.0-b/px, 0, 1)*show*dots*0.6)
@@ -336,7 +344,9 @@ class Synth:
         # relief is drawn by the GPU at screen resolution (terrain.gdshader).
         kmin = max(0, int(math.floor(math.log2(1/(64*S)))))
         kmax = int(math.floor(math.log2(1/(8*px))))
-        land = water < 0.5
+        # Land-only, and faded out toward the coast: this term is large at coarse octaves
+        # (a tenth of a tile), and cut off at the shoreline it stood as a sea wall.
+        land = (water < 0.5)*smoothstep(0, 0.02, np.maximum(coast_distance(root, xs, ys, px, self.G, np.arange(M)), 0))
         detail = np.zeros(M)
         for k in range(kmin, kmax+1):
             f = 2.0**k
@@ -347,7 +357,9 @@ class Synth:
         lap('detail')
         mat = np.zeros((M, len(MATERIALS)))
         self._planned = np.zeros(M, dtype=bool)   # pixels whose houses come from their lots
-        self._lots = []                           # rows: x, y, size, yaw, r, g, b, model
+        self._lots = []                           # rows: LOT_COLUMNS
+        self._cities = []                         # (x, y, radius) of city centres drawn here
+        self._city_done = set()                   # patches whose lots are already drawn
         self._species = np.full(M, -1, dtype=np.int64)   # tree species set by the files there
         self._leaf_info(leaves, now)
         self._children_landforms(visited, descended, x0, y0, S, px, now)
@@ -403,14 +415,18 @@ class Synth:
         species = np.select([snow > 0.2, zone == ZONE_CODE['alpine'],
                              (zone == ZONE_CODE['windows']) & (pick < 0.4), zone == ZONE_CODE['windows'],
                              (zone == ZONE_CODE['network']) & (pick < 0.35),
-                             (zone == ZONE_CODE['ephemeral']) & (pick < 0.6), zone == ZONE_CODE['ephemeral'],
+                             (zone == ZONE_CODE['ephemeral']) & (pick < 0.3), zone == ZONE_CODE['ephemeral'],
                              pick < 0.22],
-                            [CONIFER, CONIFER, PALM, BROADLEAF, SHRUB, CACTUS, SHRUB, CONIFER], BROADLEAF)
+                            [CONIFER, CONIFER, PALM, BROADLEAF, SHRUB, STEAM, BOULDER, CONIFER], BROADLEAF)
         species = np.where(self._species[k] >= 0, self._species[k], species)
         kind[tree] = species[tree]
-        desert = ok & ~tree & (zone == ZONE_CODE['ephemeral']) & (mat[k, SAND] > 0.5) & (r[4] < 0.04)
-        kind[desert] = CACTUS
-        house = ok & ~tree & ~desert & (r[4] < np.clip((town-0.5)*1.2, 0, 0.55)) & ~self._planned[k]
+        # Cinder and fumaroles across the wasteland, whatever grows there otherwise.
+        desert = ok & ~tree & (zone == ZONE_CODE['ephemeral']) & (r[4] < 0.07)
+        kind[desert] = np.where(r[2][desert] < 0.35, STEAM, BOULDER)
+        # Settlements cluster into villages with open land between (Civ's towns are places,
+        # not a blanket): a village field, world-anchored, decides where houses may stand.
+        village = self.G.smooth_fbm(1/(px*40), 3, 8801)[k]
+        house = ok & ~tree & ~desert & (r[4] < np.clip((town-0.5)*1.2, 0, 0.55)*smoothstep(0.1, 0.35, village)) & ~self._planned[k]
         # Villages far off take the role of the place they stand in: warehouses among
         # vendored dependencies, factories in build output.
         lref = leaf_ref[k]
@@ -427,9 +443,22 @@ class Synth:
         tint = np.where(kind[:, None] == WAREHOUSE, np.array((132, 140, 148)), tint)
         tint = np.where(kind[:, None] == FACTORY, np.array((148, 92, 70)), tint)
         tint = np.where(kind[:, None] == CACTUS, np.array((92, 128, 78)), tint)
+        ash = (zone == ZONE_CODE['ephemeral'])[:, None]
+        tint = np.where(ash & (kind[:, None] == BOULDER), np.array((52, 48, 48)), tint)
+        tint = np.where(ash & (kind[:, None] == STEAM), np.array((150, 144, 140)), tint)
         tint = np.where(kind[:, None] == PALM, tint*0.4+np.array((118, 150, 66))*0.6, tint)   # palms: lighter fronds
         u, v, hh = fx[keep]/(N-1), fy[keep]/(N-1), H[k[keep]]
         kinds, sizes, yaws, tints = kind[keep], size[keep], r[4][keep]*math.tau, tint[keep]
+        heights = np.ones(len(kinds))
+        if self._cities:
+            # No scattered village houses inside a city centre.
+            cx_ = x0+u*S
+            cy_ = y0+v*S
+            scatter = (kinds == HOUSE) | (kinds == WAREHOUSE) | (kinds == FACTORY)
+            for (ccx, ccy, cr) in self._cities:
+                scatter &= np.hypot(cx_-ccx, cy_-ccy) > cr
+            drop = ((kinds == HOUSE) | (kinds == WAREHOUSE) | (kinds == FACTORY)) & ~scatter
+            u, v, hh, kinds, sizes, yaws, tints, heights = u[~drop], v[~drop], hh[~drop], kinds[~drop], sizes[~drop], yaws[~drop], tints[~drop], heights[~drop]
         if self._lots:
             lots = np.vstack(self._lots)
             li = ((lots[:, 0]-x0)/px).astype(np.int64)
@@ -441,6 +470,7 @@ class Synth:
             v = np.concatenate([v, (lots[:, 1]-y0)/S])
             hh = np.concatenate([hh, H[lj*N+li]])
             kinds = np.concatenate([kinds, lots[:, 7].astype(np.int64)])
+            heights = np.concatenate([np.ones(len(kind[keep])), lots[:, 8]])
             # Buildings are map symbols too: sizes were capped where each lot was made.
             sizes = np.concatenate([sizes, lots[:, 2]])
             yaws = np.concatenate([yaws, -lots[:, 3]])
@@ -454,7 +484,9 @@ class Synth:
                 v = np.append(v, (m['y']-y0)/S)
                 hh = np.append(hh, H[j*N+i])
                 kinds = np.append(kinds, OBELISK)
-                sizes = np.append(sizes, 9.0*sp*px)
+                heights = np.append(heights, 1.0)
+                # Scaled with its disk, within symbol limits: small from orbit, never a tower block.
+                sizes = np.append(sizes, float(np.clip(0.012*m.get('disk_side', 0.2), 2.5*sp*px, 5.0*sp*px)))
                 yaws = np.append(yaws, 0.0)
                 tints = np.vstack([tints, np.array((212, 184, 110))])
         order = np.argsort(-sizes, kind='stable')[:MAX_INSTANCES]
@@ -465,6 +497,7 @@ class Synth:
         out['kind'] = kinds[order]
         out['yaw'] = (np.mod(yaws[order], math.tau)/math.tau*255).astype(np.uint8)
         out['rgb'] = np.clip(tints[order], 0, 255).astype(np.uint8)
+        out['pad'][:, 0] = np.clip(np.rint(heights[order]*32), 32, 255).astype(np.uint8)   # height factor x32
         return out
 
     def _leaf_info(self, leaves, now):
@@ -505,9 +538,17 @@ class Synth:
                 if not (x0 <= x < x0+S and y0 <= y < y0+S):
                     continue
                 if now-(c['newest'] or 0) < 900:
-                    self._lots.append(np.array([[x, y, 1.3*SP*px, 0.0, 236, 240, 238, STEAM]]))
+                    self._lots.append(np.array([[x, y, 1.3*SP*px, 0.0, 236, 240, 238, STEAM, 1.0]]))
                 if _volcanic(c):
-                    self._lots.append(np.array([[x, y, 1.8*SP*px, 0.0, 84, 80, 78, STEAM]]))
+                    self._lots.append(np.array([[x, y, 1.8*SP*px, 0.0, 84, 80, 78, STEAM, 1.0]]))
+                # A folder mostly of code, seen from afar, is one city: Civ-like, tall at its
+                # centre. Vendored dependencies are a warehouse district instead.
+                code = content_shares(c['kinds'], c.get('kind_bytes')).get('code', 0)+content_shares(c['kinds'], c.get('kind_bytes')).get('databases', 0)
+                if code >= 0.4 and (c['files'] or 0) >= CITY_MIN and c['side'] >= 6*SP*px:
+                    vendored = any(v in c['path']+'/' for v in VENDORED)
+                    rows = self._city(x, y, c['side'], c['files'], 'depot' if vendored else 'code', c['path'], px)
+                    if rows:
+                        self._lots.append(np.array(rows, dtype=np.float64))
 
     def _file_landforms(self, T, pl, roles, x0, y0, S, px, now):
         """Single landmarks at a file's site: a town hall for a project manifest, a power
@@ -517,19 +558,80 @@ class Synth:
         x, y, rf = pl['x'], pl['y'], pl.get('rf', pl['r'])
         inside = (x >= x0) & (x < x0+S) & (y >= y0) & (y < y0+S) & (rf/px >= 2.0)
         rows = []
-        for role, model, lo, hi, tint in ((ROLE_CODE['hall'], HALL, 3, 2.4, (150, 96, 70)),
-                                          (ROLE_CODE['power'], POWER, 4, 3.2, (208, 204, 196)),
-                                          (ROLE_CODE['arch'], ARCH, 3, 2.0, (184, 118, 78))):
+        # (role, model, smallest and largest size in samples, tint)
+        for role, model, lo, hi, tint in ((ROLE_CODE['hall'], HALL, 3, 7, (150, 96, 70)),
+                                          (ROLE_CODE['power'], POWER, 4, 10, (208, 204, 196)),
+                                          (ROLE_CODE['arch'], ARCH, 3, 20, (190, 104, 62))):
             for i in np.flatnonzero(inside & (roles == role)):
-                rows.append([x[i], y[i], float(np.clip(rf[i]*0.9, lo*px, hi*SP*px)), (i*2.4) % math.tau, *tint, model])
+                rows.append([x[i], y[i], float(np.clip(rf[i]*1.2, lo*px, hi*px)), (i*2.4) % math.tau, *tint, model, 1.0])
         for i in np.flatnonzero(inside & (now-pl['mtime'] < 900)):
-            rows.append([x[i]+rf[i]*0.25, y[i], 1.3*SP*px, 0.0, 236, 240, 238, STEAM])
+            rows.append([x[i]+rf[i]*0.25, y[i], 1.3*SP*px, 0.0, 236, 240, 238, STEAM, 1.0])
         if T.repo:
             town = [q for q in pl.get('patches', []) if q['kind'] == 'code']
             if town and x0 <= town[0]['x'] < x0+S and y0 <= town[0]['y'] < y0+S and town[0]['side']/px > 6:
-                rows.append([town[0]['x'], town[0]['y'], 2.2*SP*px, 0.4, 176, 60, 52, KEEP])
+                rows.append([town[0]['x'], town[0]['y'], float(np.clip(0.3*town[0]['side'], 5*SP*px, 9*SP*px)), 0.4, 176, 60, 52, KEEP, 1.0])
+        rows.extend(self._city_centres(T, pl, x0, y0, S, px))
         if rows:
             self._lots.append(np.array(rows, dtype=np.float64))
+
+    @staticmethod
+    def _skyline(pl, fi, wx, wy, jitter):
+        """Height factor of buildings in a town: 1 at the edge, rising toward the centre of a
+        big town (more files, taller centre), like Civ's cities."""
+        hf = np.ones(len(fi))
+        patches = pl.get('patches', [])
+        for j, f in enumerate(fi):
+            q = patches[int(pl['patch'][f])] if patches else None
+            if q is None or q['n'] < CITY_MIN:
+                continue
+            rel = math.hypot(wx[j]-q['x'], wy[j]-q['y'])/(0.42*q['side'])
+            top = 1.0+1.1*min(3.0, math.log10(q['n']))
+            hf[j] = 1.0+(top-1.0)*max(0.0, 1.0-rel)**1.6*(0.55+0.45*float(jitter[j]))
+        return hf
+
+    def _city_centres(self, T, pl, x0, y0, S, px):
+        """Zoomed out, a big town of files is a Civ-like city: a tight cluster of buildings,
+        low at the edge and tallest at the centre, standing for the whole patch."""
+        rows = []
+        for pi, q in enumerate(pl.get('patches', [])):
+            if q['kind'] not in ('code', 'databases', 'industry') or q['n'] < CITY_MIN:
+                continue
+            if (T.node_id, pi) in self._city_done or not (x0 <= q['x'] < x0+S and y0 <= q['y'] < y0+S):
+                continue
+            rows.extend(self._city(q['x'], q['y'], q['side'], q['n'], q['kind'], T.path+str(pi), px))
+        return rows
+
+    def _city(self, x, y, side, n, kind, key, px):
+        """A Civ-like city: a tight cluster of buildings on a golden-angle spiral, tallest at
+        the centre (more files, taller), low houses at its edge."""
+        b = 1.25*SP*px                                            # one building, as a map symbol
+        if side < 3*b:
+            return []
+        count = int(np.clip(3*math.sqrt(n), 7, 70))
+        R = min(0.4*side, b*0.62*math.sqrt(count))
+        count = min(count, int((R/b)**2/0.4)+1)
+        h = stable_hash(key+'city')
+        ang = (h % 628)/100
+        top = 1.0+1.1*min(3.0, math.log10(max(n, 1)))
+        if kind == 'depot':
+            top = min(top, 1.8)                                   # warehouses stay low
+        golden = math.pi*(3-math.sqrt(5))
+        rows = []
+        for i in range(count):
+            rr = R*math.sqrt((i+0.5)/count)
+            a = i*golden+ang
+            cx, cy = x+rr*math.cos(a), y+rr*math.sin(a)
+            jit = ((h >> (i % 40)) & 0xFF)/255
+            hf = 1.0+(top-1.0)*(1-rr/R)**1.6*(0.55+0.45*jit)
+            if kind == 'depot':
+                model = BLOCK if hf > 1.5 else WAREHOUSE
+                tint = np.array((132, 140, 148)) if model == WAREHOUSE else CITY_TINTS[(h >> (i % 23)) % len(CITY_TINTS)]
+            else:
+                model = TOWER if hf > 2.4 else BLOCK if hf > 1.4 else (FLAT if kind != 'databases' else SILO)
+                tint = CITY_TINTS[(h >> (i % 23)) % len(CITY_TINTS)] if hf > 1.4 else ROOFS[(h >> (i % 17)) % len(ROOFS)]
+            rows.append([cx, cy, b*(0.9+0.2*jit), ang, *tint, model, hf])
+        self._cities.append((x, y, R+b))
+        return rows
 
     @staticmethod
     def _lot_models(fi, roles, style_model, style_roof, age_file):
@@ -609,25 +711,56 @@ class Synth:
                 'mtime': node.get('mtime') or 0, 'side': side_T*0.25, 'day': node.get('day') or 0, 'scanned': True,
                 'files': node.get('files') or 0, 'dirs': node.get('dirs') or 0}
 
-    def _library_symbols(self, T, k, b, sc, kinds_px, seeds, inv, entries, f, xs, ys, px, H, symbol):
-        """One landform per member of a library, fading out as that member's own fields fade in."""
-        code = KIND_CODE.get(T.uniform, -1)
-        if T.uniform not in SYMBOL_KINDS:
+    def _library_symbols(self, T, k, b, sc, kinds_px, seeds, inv, entries, f, xs, ys, px, H, symbol, typical):
+        """A library is one massif, not a field of bumps: the whole library rises as a plateau
+        or range from its edge, and each member is carved from it. Films are mesas of a
+        tableland cut by canyons along their borders; PDF collections are the peaks of one
+        range, meeting at high saddles. Terms that differ between members vanish at their
+        borders; the shared plateau depends only on the library's edge."""
+        if T.uniform not in SYMBOL_KINDS or T.library_dist is None:
             return
-        child = kinds_px >= 2   # members (tiny or not), not the home district
+        code = KIND_CODE.get(T.uniform, -1)
+        member = np.array([e is not None and e['label'] in T.members for e in entries])
+        child = kinds_px >= 2
         if not child.any():
             return
+        summit = member[inv][child]
         kk = k[child]
-        cx = np.array([e['centroid'][0] if e is not None else 0.0 for e in entries])[inv[child]]
-        cy = np.array([e['centroid'][1] if e is not None else 0.0 for e in entries])[inv[child]]
         side = sc[child]
-        d = np.hypot(xs[kk]-cx, ys[kk]-cy)/(0.5*side)
-        n1 = self._grouped_fbm(kk, side, 6.0, 3, 717, np.zeros(kk.size, dtype=np.int64))
-        top = smoothstep(0.62, 0.42, d+0.14*n1)
-        # Heights vanish at each member's border and hand over to its own fields up close.
-        w = top*smoothstep(0, 0.15*side, b[child])*(1-smoothstep(60*px, 160*px, side))*f[child]
-        rise = {'video': 0.07, 'pdf': 0.09, 'images': 0.025, 'archives': 0.03, 'audio': -0.004, 'code': 0.012}[T.uniform]
-        H[kk] += rise*side*(top if T.uniform != 'pdf' else top**0.6)*w/np.maximum(top, 1e-9)
+        bb = b[child]
+        u = (xs[kk]-T.x0)/T.cell-0.5
+        v = (ys[kk]-T.y0)/T.cell-0.5
+        edge = _bilinear(T.library_dist, u, v, T.n)*T.cell
+        # The range scales with the library as a whole, not with one member: a library of 400
+        # members is a great range, not 400 hills.
+        side_T = T.node.get('side', T.size)
+        scale = math.sqrt(typical*side_T)
+        plateau = smoothstep(0, 0.08*side_T, edge)
+        ridged = 1-np.abs(self.G.smooth_fbm(_octave(2.5/scale), 5, 719)[kk])
+        fT = f[child]
+        # Member detail hands over to the member's own fields up close (shared by all members,
+        # so the fade itself raises no step at a border).
+        detail = f[child]*(1-smoothstep(60*px, 160*px, typical))
+        kind = T.uniform
+        if kind == 'video':
+            base = 0.016*side_T*plateau
+            mesa = smoothstep(0.02*side, 0.09*side, bb)          # flat tops, canyon walls at borders
+            H[kk] += (base+0.04*scale*mesa*plateau*detail*summit)*fT
+            w = np.maximum(plateau*0.7, mesa*plateau)
+        elif kind == 'pdf':
+            # One range: crests from ridged noise across the whole library, each member a
+            # summit on it (heights vanish at member borders only for the summit term).
+            crest = ridged**2
+            base = 0.035*side_T*plateau*(0.3+0.7*crest)
+            peak = smoothstep(0, 0.45*side, bb)**1.4*(0.5+0.5*crest)
+            H[kk] += (base+0.05*side*peak*plateau*detail*summit)*fT
+            w = plateau
+        else:
+            rise = {'images': 0.012, 'archives': 0.03, 'audio': -0.004, 'code': 0.006}.get(kind, 0.0)
+            H[kk] += rise*scale*plateau*fT
+            w = plateau*0.8
+        # Colour follows the plateau alone (it already vanishes at the library's edge), so the
+        # range reads as rock even while its heights are still fading in.
         symbol[kk, 0] = np.maximum(symbol[kk, 0], w)
         symbol[kk, 1] = code
 
@@ -648,8 +781,8 @@ class Synth:
                 m = np.eye(8)[ROCK]
                 ww = np.clip(ww, 0, 1)
             elif kind == 'video':
-                band = np.sin(H[kk]/(px*6)*math.pi)*0.5+0.5
-                col = np.array((160, 96, 66))*(1-band[:, None])+np.array((204, 162, 116))*band[:, None]
+                band = np.sin(H[kk]/(px*4)*math.pi)*0.5+0.5
+                col = np.array((164, 98, 66))*(1-band[:, None])+np.array((206, 166, 118))*band[:, None]
                 m = np.eye(8)[ROCK]*0.6+np.eye(8)[SAND]*0.4
             elif kind == 'images':
                 col = np.array((50, 72, 48))*np.ones((kk.size, 1))
@@ -890,6 +1023,8 @@ class Synth:
         lab, _ = label_at(T, x0+(flat % N)*px, y0+(flat // N)*px, px)
         if r['kind'] == 'upper':
             own = lab == r['child']
+        elif r['kind'] == 'gorge':
+            own = (lab != SEA) & (lab != OUT)
         elif r['kind'] == 'delta':
             own = (lab == SEA) | (lab == OUT) | (lab == HOME)
         else:
@@ -902,7 +1037,7 @@ class Synth:
         valley = np.clip(1-(sd+wt/2)/(wt*2.5), 0, 1)
         # Rivers fade in as they widen, so small networks never etch the map like cracks.
         show = smoothstep(1.2, 3.5, wt/px)
-        if r.get('canyon') and r['kind'] == 'stream':
+        if r['kind'] == 'gorge':
             # A slot canyon: a chain of folders each holding one folder. Deep and narrow,
             # with banded sandstone walls.
             gorge = np.clip(1-(sd+wt/2)/(wt*4.0), 0, 1)
@@ -1095,10 +1230,15 @@ class Synth:
                 kind = KIND_NAMES[c]
                 rr, ee, tt = rel[s_], er[s_], tone[s_]
                 if kind == 'pdf':
-                    # A massif: each PDF a peak, saddles between them; rock by age.
+                    # A range, not a field of bumps: the whole patch rises as one massif from
+                    # its foothills, ridged along its length, and each PDF is a summit on it
+                    # (broad, so neighbouring summits meet at high saddles). Rock by age.
                     sharp = np.where(age[s_] < 180, 1.6, np.where(age[s_] < 1095, 1.0, 0.7))
-                    peak = np.clip(1-rr/1.15, 0, 1)**sharp*landmark[i1][s_]
-                    h[s_] = r1[s_]*0.18*smoothstep(0, 0.5, pe[s_])+rf[s_]*0.45*prom[s_]*peak*smoothstep(0, 0.15, ee)
+                    rp = d1[s_]/r1[s_]
+                    peak = np.clip(1-rp/1.9, 0, 1)**sharp*landmark[i1][s_]
+                    ridge = (1-np.abs(self.G.smooth_fbm(_octave(1.2/rmean), 4, 1221)[k][s_]))**2
+                    massif = smoothstep(0, 2.2, pe[s_])
+                    h[s_] = r1[s_]*massif*(0.12+0.16*ridge)+r1[s_]*0.2*prom[s_]*peak*massif
                     rock = ROCK_LUT[np.searchsorted(ROCK_LIMITS, age[s_])]
                     mix = np.clip(0.35+peak*1.6, 0, 1)[:, None]
                     col = base[s_]*(1-mix)+rock*mix*(0.9+0.2*(n1[s_, None]*0.5+0.5))
@@ -1123,12 +1263,14 @@ class Synth:
                     h[s_] = r1[s_]*0.05*(0.6+0.8*crown*fine[s_])
                     m[s_, FOREST] = 1
                 elif kind == 'video':
-                    # Canyon country: each video a mesa of banded strata, as film is banded in
-                    # frames; a large file is a broad, tall mesa, a small one a butte.
-                    top = smoothstep(0.72, 0.52, rr+0.12*n1[s_])*landmark[i1][s_]
-                    hh = rf[s_]*0.3*prom[s_]*top
-                    h[s_] = hh*smoothstep(0, 0.1, ee)
-                    band = np.sin(hh/(rf[s_]*0.025)*math.pi)*0.5+0.5
+                    # Canyon country: the patch is one tableland of banded strata (film is banded
+                    # in frames), each video a mesa of it, with narrow canyons between them.
+                    # A large file stands a little taller than a small one.
+                    table = smoothstep(0, 1.6, pe[s_])
+                    top = smoothstep(0.03, 0.14, ee+0.03*n1[s_])*landmark[i1][s_]*table
+                    hh = r1[s_]*(0.22*table+0.16*prom[s_]*top)
+                    h[s_] = hh
+                    band = np.sin(hh/(r1[s_]*0.02)*math.pi)*0.5+0.5
                     strata = np.array((158, 92, 64))*(1-band[:, None])+np.array((204, 164, 116))*band[:, None]
                     flat_top = smoothstep(0.9, 1.0, top)[:, None]
                     ground = np.array((188, 150, 108))
@@ -1185,9 +1327,20 @@ class Synth:
                     col = town*(1-painted[:, None])+roof*painted[:, None]
                     out[s_] = col*(1-street[:, None])+np.array((104, 102, 98))*street[:, None]
                     if T.repo and kind == 'code':
-                        # A git repository is walled: stone along the town's edge.
-                        wall = ((pe[s_] < 0.05) | (leaf_bd[k][s_] < 1.4*px)) & (detail[s_] > 0.3)
-                        out[s_] = np.where(wall[:, None], np.array((150, 142, 128)), out[s_])
+                        # A git repository is a walled town: a pale stone rampart round the town,
+                        # shadowed on its outer side, with towers along it (3D, see below).
+                        edge_px = np.minimum(pe[s_]*r1[s_], leaf_bd[k][s_])/px
+                        wall = (edge_px < 2.2) & (edge_px > 0.4)
+                        shadow = edge_px <= 0.4
+                        out[s_] = np.where(wall[:, None], np.array((206, 196, 172)), np.where(shadow[:, None], np.array((82, 76, 68)), out[s_]))
+                        h[s_] += np.where(wall, 1.5*px, 0.0)
+                        wk = k[s_][wall]
+                        if wk.size:
+                            cell = (wk // N)//6*1000+(wk % N)//6
+                            _, first = np.unique(cell, return_index=True)
+                            wk = wk[first][::2]
+                            self._lots.append(np.column_stack([xs[wk], ys[wk], np.full(wk.size, 1.6*SP*px), np.zeros(wk.size),
+                                                               np.full((wk.size, 3), (196, 186, 164)), np.full(wk.size, WALL_TOWER), np.ones(wk.size)]))
                     # No building heights in the terrain: the houses are 3D models (see
                     # _instances); raised lots became pillars on wide parcels.
                     m[s_, TOWN] = 1
@@ -1206,8 +1359,14 @@ class Synth:
                         wy_ = sy[i1][s_][on][first]+(cu*np.sin(an)+cv*np.cos(an))*rr_
                         fi = i1[s_][on][first]
                         model, tint = self._lot_models(fi, roles, style_model, style_roof, age_file)
-                        lot_size = np.clip(2*size[on][first]*rr_*1.4, 2.5*px, 1.6*SP*px)
-                        self._lots.append(np.column_stack([wx_, wy_, lot_size, an, tint, model]))
+                        lot_size = np.clip(2*size[on][first]*rr_*1.4, 2.5*px, 3.0*SP*px)
+                        # Big towns rise toward their centre: blocks, then towers.
+                        lift = self._skyline(pl, fi, wx_, wy_, lot[on][first])
+                        model = np.where((lift > 2.4) & (model != RUIN), TOWER, np.where((lift > 1.4) & (model != RUIN), BLOCK, model))
+                        tint = np.where((lift > 1.4)[:, None] & (model != RUIN)[:, None], CITY_TINTS[fi % len(CITY_TINTS)], tint)
+                        self._lots.append(np.column_stack([wx_, wy_, lot_size, an, tint, model, lift]))
+                        # The painted city centre (zoomed out) makes way for these lots.
+                        self._city_done.add((T.node_id, int(pl['patch'][fi[0]])))
                 elif kind == 'archives':
                     # A glacier: one ice body, crevassed between files.
                     crev = (1-smoothstep(0.02, 0.06, ee))*detail[s_]
@@ -1240,7 +1399,7 @@ class Synth:
                 else:
                     # Scrub with a cairn at each file.
                     shrub = (self.G.value(_octave(14.0/rmean), 6161)[k][s_] > 0.7)*fine[s_]
-                    cairn = np.clip((0.12-rr)*rf[s_]/px+0.5, 0, 1)*detail[s_]*landmark[i1][s_]
+                    cairn = np.clip((0.12-rr)*rf[s_]/px+0.5, 0, 1)*detail[s_]*landmark[i1][s_]*(roles[i1][s_] != ROLE_CODE['arch'])
                     col = np.array((150, 142, 110))*(0.97+0.06*tt[:, None])
                     col = col*(1-shrub[:, None]*0.5)+np.array((96, 104, 72))*shrub[:, None]*0.5
                     out[s_] = col*(1-cairn[:, None])+np.array((168, 164, 152))*cairn[:, None]

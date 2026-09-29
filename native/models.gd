@@ -6,7 +6,8 @@ extends RefCounted
 
 static func build() -> Array[ArrayMesh]:
 	return [broadleaf(), conifer(), house(), boulder(), palm(), cactus(), shrub(), oak(), flat_house(), factory(),
-		warehouse(), silo(), power_station(), ruin(), town_hall(), keep(), steam(), obelisk(), arch()]
+		warehouse(), silo(), power_station(), ruin(), town_hall(), keep(), steam(), obelisk(), arch(), block(), tower(),
+		wall_tower()]
 
 static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, part: float, centre: Vector3 = Vector3(INF, 0, 0)):
 	# Faces point away from the model's centre (or its axis), wound clockwise as seen from
@@ -329,26 +330,62 @@ static func obelisk() -> ArrayMesh:
 	return _finish(st)
 
 static func arch() -> ArrayMesh:
+	# A sandstone arch in the manner of Delicate Arch: a slickrock fin at the base, two massive
+	# buttressed legs, and a thick span thinning to a waist at the top, all banded red rock.
 	var st = _begin()
-	# A natural arch: two rock legs and a curved span.
-	var segs = 7
-	for i in segs:
-		var a0 = PI*i/segs
-		var a1 = PI*(i+1)/segs
-		var r_out = 0.5
-		var r_in = 0.34
-		var p0 = Vector3(-cos(a0)*r_out, sin(a0)*r_out*1.3, 0)
-		var p1 = Vector3(-cos(a1)*r_out, sin(a1)*r_out*1.3, 0)
-		var q0 = Vector3(-cos(a0)*r_in, sin(a0)*r_in*1.3, 0)
-		var q1 = Vector3(-cos(a1)*r_in, sin(a1)*r_in*1.3, 0)
-		var dz = Vector3(0, 0, 0.12)
-		var c = (p0+p1+q0+q1)*0.25
-		_tri(st, p0-dz, p1-dz, q1-dz, 1.0, c)
-		_tri(st, p0-dz, q1-dz, q0-dz, 1.0, c)
-		_tri(st, p0+dz, q1+dz, p1+dz, 1.0, c)
-		_tri(st, p0+dz, q0+dz, q1+dz, 1.0, c)
-		_tri(st, p0-dz, p0+dz, p1+dz, 1.0, c)
-		_tri(st, p0-dz, p1+dz, p1-dz, 1.0, c)
-		_tri(st, q0-dz, q1+dz, q0+dz, 1.0, c)
-		_tri(st, q0-dz, q1-dz, q1+dz, 1.0, c)
+	_blob(st, Vector3(0, 0.05, 0), Vector3(0.75, 0.14, 0.42), 0.0, 61)
+	_blob(st, Vector3(-0.5, 0.2, 0.02), Vector3(0.22, 0.3, 0.24), 1.0, 62)
+	_blob(st, Vector3(0.52, 0.18, -0.02), Vector3(0.24, 0.26, 0.22), 1.0, 63)
+	var segs = 14
+	var ring = 7
+	var prev = []
+	for i in segs+1:
+		var t = float(i)/segs
+		var a = PI*t
+		var cx = -cos(a)*0.5
+		var cy = sin(a)*1.0+0.12
+		var tangent = Vector3(sin(a)*0.5, cos(a)*1.0, 0).normalized()
+		var waist = sin(a)
+		var thick = lerpf(0.2, 0.1, waist)*(1.0+0.15*sin(t*19.0+1.3))
+		var depth = lerpf(0.2, 0.12, waist)
+		var normal = Vector3(-tangent.y, tangent.x, 0)
+		var pts = []
+		for k in ring:
+			var th = TAU*k/ring
+			pts.append(Vector3(cx, cy, 0)+normal*cos(th)*thick+Vector3(0, 0, sin(th)*depth))
+		if i > 0:
+			var c = Vector3(cx, cy, 0)
+			for k in ring:
+				var k1 = (k+1) % ring
+				_tri(st, prev[k], pts[k1], prev[k1], 1.0, c)
+				_tri(st, prev[k], pts[k], pts[k1], 1.0, c)
+		prev = pts
+	return _finish(st)
+
+static func block() -> ArrayMesh:
+	# A mid-rise city block: a flat-roofed slab with a parapet and a roof-top box.
+	var st = _begin()
+	_box(st, Vector3(-0.42, 0, -0.36), Vector3(0.42, 0.62, 0.36), 1.0, false)
+	_box(st, Vector3(-0.44, 0.62, -0.38), Vector3(0.44, 0.67, 0.38), 0.0)
+	_box(st, Vector3(-0.12, 0.67, -0.1), Vector3(0.14, 0.76, 0.12), 0.0)
+	return _finish(st)
+
+static func tower() -> ArrayMesh:
+	# A tower: a tall shaft on a podium, with a setback and a crown.
+	var st = _begin()
+	_box(st, Vector3(-0.45, 0, -0.4), Vector3(0.45, 0.22, 0.4), 0.0, false)
+	_box(st, Vector3(-0.3, 0.22, -0.28), Vector3(0.3, 1.2, 0.28), 1.0, false)
+	_box(st, Vector3(-0.22, 1.2, -0.2), Vector3(0.22, 1.45, 0.2), 1.0, false)
+	_box(st, Vector3(-0.24, 1.45, -0.22), Vector3(0.24, 1.5, 0.22), 0.0)
+	return _finish(st)
+
+static func wall_tower() -> ArrayMesh:
+	# A round wall tower with a crenellated top: strung along a repository's rampart.
+	var st = _begin()
+	_prism(st, 0.3, 0.0, 0.7, 8, 1.0)
+	for k in 8:
+		if k % 2 == 1: continue
+		var a = TAU*k/8
+		var c = Vector3(cos(a)*0.26, 0.7, sin(a)*0.26)
+		_box(st, c-Vector3(0.07, 0, 0.07), c+Vector3(0.07, 0.12, 0.07), 1.0)
 	return _finish(st)

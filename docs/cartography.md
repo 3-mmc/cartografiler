@@ -60,7 +60,7 @@ land borders along ridgelines, and nothing below the continents is split by wate
 | Temperate | Linux-native (ext4, btrfs, xfs…) | Home soil: fast, ordinary, cultivated. |
 | Tropical | Windows volumes over WSL's 9p bridge | Sprawling land where downloads and media accumulate. |
 | Wetland | Network mounts (CIFS/SMB, NFS, sshfs, rclone) | Reachable, but wetter and slower. |
-| Desert | Virtual and ephemeral (tmpfs, proc, sysfs) | Nothing permanent grows; wiped at every boot. |
+| Volcanic wasteland | Virtual and ephemeral (tmpfs, proc, sysfs) | The kernel's live state, remade every moment: ash, cinder cones and fumaroles. Nothing permanent grows. |
 | Alpine | Anywhere you cannot write (`/usr`, `C:\Windows`) | Look, don't build. High and owned by someone else. |
 
 ## Hydrology: structure is drainage
@@ -147,9 +147,14 @@ plain ground, not programs.
 
 A folder whose subfolders are mostly one kind (eight or more, 70% of them) is a
 **library**: a film collection, a set of albums, a photo archive by year. It is drawn as one
-landscape of that kind, with no divides, streams or lakes between its members, and each
-member stands as a single landform: a mesa per film, a wood per album of photos, a peak per
-PDF collection. As you approach, each landform hands over to that member's own fields.
+landscape of that kind, with no divides, streams or lakes between its members. The whole
+library rises as **one massif** from its edge, scaled with the library rather than with any
+one member: a PDF library is a mountain range with a summit per member, a film library a
+tableland of banded strata cut into mesas by canyons along the members' borders.
+
+**Ranges, not bumps.** Within a folder too, a patch of PDFs is one range whose summits are
+the files, and a patch of videos one tableland whose mesas are the files, with narrow canyons
+between; earlier each file was its own separate hill. As you approach, each landform hands over to that member's own fields.
 Places named on the map carry what they are when it is clear: *"Kino, video library ·
 55 videos"*.
 
@@ -160,11 +165,12 @@ contents):
 
 | Building | Stands for | Recognised by |
 |---|---|---|
+| City (Civ-like): low houses at the edge, blocks, then towers at the centre | A town of 25 or more source files; seen from afar, any folder mostly of code. More files, taller centre | count |
 | House, in its language's architecture | Source files: Python terracotta gables, JavaScript white flat roofs, C/C++ slate, Rust rust-red, Go blue flat roofs, Java green, shell timber | extension |
 | Town hall on a square | A project's manifest | `pyproject.toml`, `Cargo.toml`, `package.json`, `Makefile`, `Dockerfile`… |
-| Walled town with a keep | A git repository | a `.git` folder |
+| Walled town: a pale rampart with round towers, and a keep on the square | A git repository | a `.git` folder |
 | Factory (sawtooth roof, chimney) | Build output | binaries under `build/`, `dist/`, `target/`, `out/`… |
-| Warehouse | Vendored dependencies | under `node_modules`, `site-packages`, `.venv`, `vendor`… |
+| Warehouse (a low warehouse district from afar) | Vendored dependencies | under `node_modules`, `site-packages`, `.venv`, `vendor`… |
 | Silo | A database | `.db`, `.sqlite`… |
 | Power station (cooling towers) | AI model weights | `.safetensors`, `.gguf`, `.ckpt`, `.pt`, `.onnx`… |
 | Ruin | Code untouched for three years | modification time |
@@ -189,9 +195,9 @@ Each is rare by construction; if one appears everywhere its threshold is wrong.
 | Volcano with a glowing crater and smoke | A folder of 200+ files, most of which changed this week |
 | Salt flat, white and cracked | An empty folder |
 | Fenced, greyed and hatched ground | A folder the survey could not open |
-| Slot canyon, banded sandstone | A chain of folders each holding only one folder |
-| Natural arch | A symlink or junction (a bridge to elsewhere) |
-| Monument (a gilded obelisk, named at every zoom) | The largest file on each disk |
+| Slot canyon: a deep gorge in banded sandstone | A folder holding only one folder (down a chain, the gorges line up) |
+| Natural arch of red sandstone, on a slickrock fin | A symlink or junction (a bridge to elsewhere) |
+| Monument (a gilded obelisk sized with its disk, named at every zoom) | The largest file on each disk |
 
 ### 3D landmarks
 

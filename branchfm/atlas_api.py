@@ -278,9 +278,14 @@ class Atlas:
                 if not hit:
                     continue
                 where = self.region(hit[0], survey=False)
+                root_t = self.world.root()
+                if root == '/':
+                    disk_side = root_t.node.get('continent', {}).get('side', 0.2)
+                else:
+                    disk_side = next((c['side'] for c in root_t.children if c['path'] == root), 0.2)
                 if 'x' in where:
                     places.append({'path': hit[0], 'name': hit[1], 'size': hit[2], 'x': where['x'], 'y': where['y'],
-                                   'disk': World.display_name(root, root) if root != '/' else 'Linux'})
+                                   'disk': World.display_name(root, root) if root != '/' else 'Linux', 'disk_side': disk_side})
             with self.index.write_lock:
                 db.execute("INSERT OR REPLACE INTO meta VALUES('monuments', ?)", (json.dumps({'time': time.time(), 'places': places}),))
                 db.commit()
