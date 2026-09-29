@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+branch_root="$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
+export PYTHONPATH="$branch_root${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m branchfm "$@"
