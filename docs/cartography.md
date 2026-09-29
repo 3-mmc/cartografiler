@@ -6,187 +6,145 @@ filesystem and never borrows another system's meaning.
 
 | System | Question it answers | Driven by |
 |---|---|---|
-| **Climate** | *Which part of the machine am I on?* | the mount / filesystem and write permission |
-| **Hydrology** | *How is it organised?* | the directory tree |
-| **Geology & landforms** | *What is this, how big, and how old?* | file type, metadata, modification time |
-| **Weather** | *What is happening now?* | recent modification activity |
-| **Sea & tides** | *How much room is left, and what is really here?* | disk usage; cloud-file hydration state |
-| **Human geography** | *Where do people act?* | your own visits; git repositories |
+| **Continents** | *Which disk is this?* | the mount |
+| **Climate** | *What kind of ground, and may I build here?* | filesystem type and write permission |
+| **Territory & hydrology** | *How is it organised, and how big is it?* | the directory tree and subtree sizes |
+| **Land cover & landforms** | *What is here?* | file kinds, one landmark per file up close |
+| **Geology** | *How old is it?* | modification time |
+| **Weather** | *What is happening now?* | files changed today |
 
-Every encoding below is computed from real data. When the data is missing the map
-shows a neutral form (a grey, undated outcrop; a survey cairn under fog), never an
-invented value. The inspector, labels and file list always carry the true name.
+Every encoding is computed from real data. When the data is missing the map shows a
+neutral form (parchment for terra incognita, a cairn for an unknown kind), never an
+invented value. Labels, field notes and the gazetteer always carry the true name.
 
 ---
 
-## Climate: the mount you stand on
+## One world, surveyed
 
-Climate belongs to large-scale geography, so it follows the largest-scale fact about
-a path: which filesystem it lives on. Crossing a mount boundary while descending is
-crossing into a different climate zone. That boundary is where WSL2's behaviour changes.
+The whole filesystem is **one continuous map**, drawn from a persistent survey index
+(`~/.local/share/branch/index.sqlite`) rather than from whatever folder you open.
+
+- **The survey** crawls breadth-first, coarse to fine, so the whole map exists early and
+  gains detail. Each filesystem is crawled natively: Linux paths by `os.scandir` in WSL,
+  Windows drives by a Windows Python worker. Measured here, 9p manages about 1k
+  entries/s, while native NTFS reaches about 70k/s on D: and 7k/s on the E: hard disk.
+  A full survey of this machine (3.65 M files, 461 k folders, every drive) took 16
+  minutes. It refreshes in the background every 12 hours; the place you look at is
+  re-listed first. Streamed cloud drives (Google Drive) go last and time out politely.
+- **Terra incognita.** Places the survey hasn't reached are parchment with survey
+  hatching. They fill in while you watch.
+- **Territory.** Every folder owns land in proportion to what it holds (compressed:
+  size^0.4, with a floor, so a 300 k-file tree can't swallow its 50-file siblings). The
+  division is a weighted Voronoi (power diagram), seeded by path hashes, so a growing
+  index moves borders gently instead of reshuffling the map. A folder's own files stand
+  as landmarks in its **home district**.
+- **Borders are fractal at every zoom.** Near a border the lookup point is displaced by
+  a multi-octave warp, from ten raster cells down to two screen pixels. Coasts and
+  provincial borders gain detail as you descend, the way real ones do.
+- **Level of detail.** A place shows its insides once it is about 24 px across, fading
+  in until about 90 px. Its detail also fades to nothing at its own border, so nothing
+  nested can raise a wall at an edge. Places under 5 px merge into their parent's
+  land cover.
+
+## Continents are disks
+
+The Linux (WSL) disk is one continent; each Windows drive (C:, D:, E:…) and each
+cloud drive is another, across open sea. `/mnt` itself folds away: its drives sit
+directly on the world. Inside a disk everything is **one landmass**. Its provinces share
+land borders along ridgelines, and nothing below the continents is split by water.
+
+## Climate: the ground you stand on
 
 | Climate | Filesystem | Reasoning |
 |---|---|---|
-| Temperate | Linux-native (ext4, btrfs, xfs…): the WSL home | Home soil: fast, ordinary, cultivated. |
-| Tropical | Windows volumes over WSL's 9p/drvfs bridge (`/mnt/c`, `/mnt/e`) | Sprawling, overgrown land where downloads and media accumulate; slower across the bridge. |
-| Wetland | Network mounts (CIFS/SMB, NFS, sshfs, rclone) | Across the water: reachable, but everything is wetter and slower. |
-| Desert | Virtual and ephemeral (tmpfs, proc, sysfs) | Nothing permanent grows here; wiped at every boot. |
-| Alpine | Anywhere you cannot write (system directories, `C:\Windows`) | Look, don't build. High, cold, owned by someone else. |
-
-`T` still cycles a region's climate by hand. That is a display override, labelled as
-such, and never saved.
+| Temperate | Linux-native (ext4, btrfs, xfs…) | Home soil: fast, ordinary, cultivated. |
+| Tropical | Windows volumes over WSL's 9p bridge | Sprawling land where downloads and media accumulate. |
+| Wetland | Network mounts (CIFS/SMB, NFS, sshfs, rclone) | Reachable, but wetter and slower. |
+| Desert | Virtual and ephemeral (tmpfs, proc, sysfs) | Nothing permanent grows; wiped at every boot. |
+| Alpine | Anywhere you cannot write (`/usr`, `C:\Windows`) | Look, don't build. High and owned by someone else. |
 
 ## Hydrology: structure is drainage
 
-Water always runs **downhill toward the parent directory.** Every region is a
-catchment basin whose river mouth faces `..`. Once learnt, this one rule lets you read
-orientation off any view.
+Water always runs **downhill toward the parent folder**. Each territory is a basin: its
+home district is the valley floor, its subfolders rise slightly above it, and divides run
+along their borders but come and go. Rivers carry every place to its parent's capital
+and on toward the sea. Rivers widen with the size of what they carry, and each is clipped
+to its own ground, so a distant ancestor's river never cuts through the place you are
+looking at.
 
-- **Trunk river**: each region has one. It rises in the interior and reaches the sea
-  at the region's outlet. Its width grows with the number of entries in the region.
-- **Tributaries**: each subdirectory is a tributary valley. The stream rises at the
-  subdirectory's landmark and joins the trunk. Width follows the logarithm of the
-  subdirectory's item count, so large subtrees are visibly larger rivers. Entering a
-  subdirectory follows the stream upstream: the child region's own outlet faces the
-  direction its tributary flowed.
-- **Valleys**: rivers carve V-shaped valleys into the ground mesh, and glaciers sit in
-  broad U-shaped troughs. Topography carries the tree even with labels hidden.
-- **Dry riverbeds (wadis)**: empty directories are channels with no water.
-- **Marshes**: generated or cache directories (`node_modules`, `__pycache__`, `.venv`,
-  `build`, `dist`, `target`, `.cache`, `.git`…) become braided, reed-choked
-  wetland. Water still flows there, but you rarely wade in on purpose.
-- **Lakes**: audio. Still water held in a basin, with area set by duration and ripple
-  rings by channel count. Every lake drains: a short outflow creek links it to the trunk.
-- **Waterfalls**: video. Moving water falling over a cliff: height from duration,
-  width of the fall from resolution. The plunge pool also drains to the trunk.
-- **Canyons**: a subdirectory with six or more subfolders cuts a canyon, a deep, narrow
-  valley with banded red walls (the Grand Canyon). Branching depth becomes vertical depth.
-- **Glaciers**: archives (zip, tar, 7z…). Frozen, compressed water that moves slowly
-  and holds material inside. Length comes from the number of entries in the archive;
-  ice density (white to deep blue) from the compression ratio. Meltwater runs from the
-  toe, because extracting an archive is melting it.
+## Land cover and landforms: what is here
 
-## Geology: substance and age
+From orbit, land cover is a blend of what a place holds, weighted by each kind's share:
 
-**Landform = what the file is. Rock = how old it is.**
-
-### Rock, from modification time
-
-Geology is a record of time, so rock type is age, and erosion runs from sharp to worn:
-
-| Last modified | Rock | Form |
-|---|---|---|
-| < 1 day | **Fresh basalt, still cooling** | Black, jagged, with an ember glow at the summit |
-| < 7 days | **Fresh basalt** | Black, steep, sharp-crested |
-| < 6 months | **Weathered basalt** | Dark brown-grey, still angular |
-| < 3 years | **Sandstone** | Colorado Plateau forms: long documents stand as **mesas** (sheer banded cliffs under a flat caprock), middling ones as **buttes**, short ones weather into **hoodoos** (Bryce Canyon) |
-| ≥ 3 years | **Granite** | Pale, low, broad and rounded: the long worn range |
-
-A newly formed basalt cone is therefore a book you were editing this week. A long,
-pale granite range is a big reference text left untouched for years. Bulk (page count)
-and age are read independently: height is size, and shape and colour are time.
-
-### Landforms, from file type
-
-| Files | Landform | Metadata → form |
-|---|---|---|
-| PDF; DOCX/PPTX with a page/slide count | **Mountain / ridge** | pages → height (bounded log); age → rock |
-| Other documents, notes, text | **Meadow** | size → extent; unknown page count stays a meadow |
-| Images | **Woodland** | pixel count → growth; orientation → shape; EXIF month → foliage; ≥ 40 MP → a giant **sequoia** |
-| Audio | **Lake** | duration → area; channels → ripples |
-| Video | **Waterfall** | duration → height; resolution → width |
-| CSV / TSV / spreadsheets | **Fields** | rows → length; columns → furrows |
-| Source & config | **Settlement** | size → number of buildings |
-| Archives | **Glacier** | entries → length; compression → ice density |
-| Executables & compiled objects | **Obsidian outcrop** | Rock transformed under heat and pressure; size → spire count |
-| Disk images (vhdx, iso, img, qcow2) | **Caldera** | A whole world collapsed into one crater; size → diameter |
-| Databases (sqlite, db, mdb) | **Well** | An aquifer: a deep store you draw from |
-| Symbolic links | **Natural arch** beside the landform | A span that leads somewhere else (Arches) |
-| Any file changed in the last 15 minutes | **Geyser** beside it | Live thermal activity (Yellowstone): logs being written, files being edited |
-| Anything else | **Cairn** | Uncharted |
-
-## Weather: what's happening now
-
-Weather is transient, so it shows transient facts: modification activity, read from
-the entries of the current region and from a shallow survey of its subdirectories.
-
-| Conditions | Meaning |
+| Content | Cover |
 |---|---|
-| **Thunderstorm**, dark cloud and lightning | ≥3 changes in the last hour, or ≥12 today |
-| **Showers** | changes today; rain density follows the count |
-| **Fair-weather cumulus** | changes this week |
-| **Clear** | changed this season, quiet this week |
-| **Snow cover** | nothing changed for more than two years; the land whitens with dormancy |
-| **Fog** | unexplored subdirectories sit under fog that lifts when you enter; unreadable directories stay fogged |
+| Images, video | Forest |
+| Tables | Fields |
+| Source code, databases | Towns |
+| PDFs, documents | Meadow |
+| Audio | Wetland |
+| Archives | Ice |
+| Executables, disk images | Bare rock |
+| Anything else | Scrub |
 
-Subdirectories with activity today carry a small rain cloud of their own, so you can
-see where work is happening from the parent's altitude before going in. `W` hides
-the weather layer.
+Up close, each file stands as a landmark in its home district: PDFs as **mountains** (rock
+by age), images as **woods**, audio as **lakes**, video as a lake below a **falls**, tables
+as **fields**, code and databases as **settlements**, archives as **glaciers**,
+executables as **obsidian** shards, disk images as **calderas**, documents as flowering
+**meadow**, and anything else as a **cairn**. Landmark size follows file size
+(logarithmically).
 
-## Sea level: room left on the disk
+## Geology: age
 
-The sea stands at a level set by the mount's disk usage. Below 75% full it stays offshore.
-Above that it rises until, at a full disk, it laps the ground: coasts drown, river valleys
-become fjords, and only landforms stand clear. The cartouche states the percentage and the
-free space.
+Ridgelines take the rock of their region's age: dark **basalt** when changed in the
+last week, weathered basalt within six months, **sandstone** within three years, pale
+**granite** beyond. Regions untouched for more than two years are **snowbound**.
 
-## Tides: cloud-mirrored files
+## Weather: the radar
 
-Cloud-sync providers that use the Windows Cloud Files API (OneDrive, Proton Drive, and
-others) register their roots in the registry. Branch reads the roots once per session and
-each directory's attribute bits with one PowerShell call. **Reading them never downloads
-anything.** The sea is the cloud:
+Weather is transient, so it shows transient facts. The **radar** (`R`, off by default)
+paints the cells where files changed today, drawn as rain radar: green for a few, yellow
+for many, red for hundreds. It is an overlay you switch on to ask a question. It never
+stands in for the map.
 
-| State | Attribute | Form |
-|---|---|---|
-| Cloud-only placeholder | RECALL_ON_DATA_ACCESS / OFFLINE | **Phantom island**: ghostly and translucent, in sea mist. Charted and named, but not on this disk until opened. (Old sea charts carried reported islands that did not exist.) |
-| Always keep on this device | PINNED | **Dike**: a stone ring holding the land against the tide |
-| Downloaded, not pinned | neither | **Tidal flat**: wet sand; Windows may reclaim it when space runs low |
-| The sync root itself | registered root | **Lighthouse and pier**: the harbour where the cloud comes ashore |
+---
 
-Not yet drawn: sync *activity* (a ferry on a shipping lane) and sync *errors* (a wreck on a
-reef). Their status lives in each provider's shell extension, not in file attributes.
+## Designed in the earlier nested map, not yet in the continuous world
 
-## Human geography: where people act
+These were built in the previous version, which drew one directory at a time. They
+return as the continuous map matures. The design is unchanged, only the drawing is
+pending:
 
-- **Roads** are desire paths. Every folder you enter and file you open in Branch is counted
-  locally (`~/.local/share/branch/visits.json`). Routes wear from the island's gate, where
-  you arrive from the parent, and widen with use. They cross rivers as fords.
-- **Walled towns** are git repositories. Commits are the population (more houses), and
-  uncommitted changes stand as scaffolding. Source files outside repositories remain small
-  **settlements**.
-
-## Time: replaying the record
-
-`Y` opens a time slider over the current region. Dragging it redraws the map as it stood
-on that date: rock is re-aged (today's granite was yesterday's sandstone), and weather is
-recomputed. Files whose last change comes later haven't formed yet. **Only
-last-modification times exist**, so a file appears at its most recent change, not its
-creation. The slider says so.
-
-## Scale: archipelagos
-
-Up to 120 entries share one island. Beyond that, up to 600 per page, a region becomes an
-**archipelago**: islands grouped by kind (folders, images, captions…) of at most 90 entries
-each, named on the map, with each landmark drawn as a simple glyph. Per-file metadata isn't
-fetched at archipelago scale, so forms stay neutral rather than guessed.
+- **Page counts as mountain height.** PDF and DOCX page counts, image dimensions,
+  audio and video durations, and table sizes from per-file metadata. Landmarks currently
+  use kind, size and age only; metadata extraction runs per file and needs a background
+  pass of its own.
+- **Tides**: cloud-only files as phantom islands, pinned files behind dikes, downloaded
+  ones on tidal flats, lighthouses at sync roots. The survey already records the Windows
+  attribute bits this needs.
+- **Sea level** from disk usage, rising to flood a continent's coasts as its disk fills.
+- **Roads** worn by your own visits (still recorded in `visits.json`), and **walled towns**
+  for git repositories.
+- **Time slider**: replaying last-modification times.
+- **Geysers** for files changed in the last 15 minutes, **arches** for symlinks,
+  **canyons** for deeply branching folders, and **mesas, buttes and hoodoos** for
+  sandstone-age documents.
 
 ---
 
 ## Interface: the map is the application
 
 - No permanent panels. The window is the map.
-- **Cartouche** (top left): the region's name, the path as a trail of place names, and
-  the current climate and weather in one line. Click the trail, or press `Ctrl+L`, to
-  type a path.
-- **Field notes** (right): appear only when something is selected. They show a preview,
-  facts, and a *reading* that states in words why the landform looks as it does.
-  Collapsible.
-- **Gazetteer** (left, `G` / `Tab`): the conventional list, filter and paging. Hidden
-  until asked for.
-- **Contextual actions**: Paste appears only while something is being carried; Undo
-  appears only after an undoable change.
-- **Chrome fades** to a faint outline while the mouse is idle and returns on movement.
-  `F` hides everything but the map.
-- **Time** (`Y`): the replay slider.
-- **Legend** (`?` / `K`): this grammar, in the app.
+- **Moving:** drag to pan, wheel to zoom at the cursor, and right-drag to turn and tilt.
+  Double-click flies to a place; Backspace goes up. Home shows the whole world, and
+  WASD/arrows pan. Flights rise high enough to see both ends, then descend.
+- **Cartouche** (top left): the place under the centre of the view, its trail of place
+  names, its size and activity, and the survey's progress. `Ctrl+L` types a path.
+- **Field notes** (right): appear only when something is selected, with a preview and a
+  *reading* that says in words why the land looks as it does.
+- **Gazetteer** (`G`): the contents of the place you are over, as a list.
+- **Bash** (`Ctrl+P`): output paths become destinations to fly to.
+- **Contextual actions**: Paste appears only while something is being carried and lands
+  in the place you are over; Undo appears only after an undoable change.
+- **Chrome fades** while the mouse is idle; `F` hides everything but the map.
+- **Legend** (`K`): this grammar, in the app.

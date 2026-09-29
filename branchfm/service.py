@@ -71,7 +71,7 @@ def bounded_extract(path, kind):
 class Service(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, start):
+    def __init__(self, start, atlas=False):
         super().__init__(('127.0.0.1',0),Handler)
         self.token = secrets.token_urlsafe(32)
         self.start = str(start)
@@ -80,6 +80,10 @@ class Service(ThreadingHTTPServer):
         self.extract_slots = threading.Semaphore(3)
         self.cache = {}
         self.visits = Path(os.environ.get('XDG_DATA_HOME',Path.home()/'.local/share'))/'branch/visits.json'
+        self.atlas = None
+        if atlas:
+            from .atlas_api import Atlas
+            self.atlas = Atlas(str(start))
 
 
 FS_CLIMATE = {'9p':'windows','drvfs':'windows','v9fs':'windows','cifs':'network','smb3':'network','nfs':'network',
@@ -87,20 +91,32 @@ FS_CLIMATE = {'9p':'windows','drvfs':'windows','v9fs':'windows','cifs':'network'
               'proc':'ephemeral','sysfs':'ephemeral','devtmpfs':'ephemeral','cgroup2':'ephemeral','debugfs':'ephemeral'}
 
 
+_mounts = (0.0, [])
+
+
+def mount_table():
+    global _mounts
+    if time.monotonic()-_mounts[0] > 30:
+        table = []
+        try:
+            with open('/proc/mounts',encoding='utf-8',errors='replace') as mounts:
+                for line in mounts:
+                    parts = line.split()
+                    if len(parts)>=3:
+                        table.append((parts[1].replace('\\040',' '),parts[2]))
+        except OSError:
+            pass
+        _mounts = (time.monotonic(),table)
+    return _mounts[1]
+
+
 def filesystem(path):
     """The mount containing path: its type decides the region's climate."""
     best = ('/','unknown')
-    try:
-        with open('/proc/mounts',encoding='utf-8',errors='replace') as mounts:
-            for line in mounts:
-                parts = line.split()
-                if len(parts)<3: continue
-                mount = parts[1].replace('\\040',' ')
-                inside = str(path)==mount or str(path).startswith(mount.rstrip('/')+'/')
-                if inside and len(mount)>=len(best[0]):
-                    best = (mount,parts[2])
-    except OSError:
-        pass
+    for mount, kind in mount_table():
+        inside = str(path)==mount or str(path).startswith(mount.rstrip('/')+'/')
+        if inside and len(mount)>=len(best[0]):
+            best = (mount,kind)
     facts = {'mount':best[0],'type':best[1],'zone':FS_CLIMATE.get(best[1],'native'),'writable':os.access(path,os.W_OK)}
     try:
         usage = shutil.disk_usage(path)
@@ -201,6 +217,30 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError,ConnectionResetError):
             pass
 
+    def world_request(self, endpoint, query):
+        atlas = self.server.atlas
+        if atlas is None:
+            return self.reply(404,{'error':'The world map is not enabled in this service.'})
+        q = lambda k, d=None: query.get(k,[d])[0]
+        if endpoint=='/tile':
+            body = atlas.tile(int(q('l')),int(q('x')),int(q('y')))
+            self.send_response(200)
+            self.send_header('Content-Type','application/octet-stream')
+            self.send_header('Content-Length',str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError,ConnectionResetError):
+                pass
+            return
+        if endpoint=='/places':
+            return self.reply(200,atlas.places(float(q('x0')),float(q('y0')),float(q('x1')),float(q('y1')),float(q('px'))))
+        if endpoint=='/at':
+            return self.reply(200,atlas.at(float(q('x')),float(q('y')),float(q('px'))))
+        if endpoint=='/region':
+            return self.reply(200,atlas.region(q('path','/')))
+        return self.reply(200,atlas.status(int(q('since','0'))))
+
     def authorized(self):
         return secrets.compare_digest(self.headers.get('Authorization',''), 'Bearer '+self.server.token)
 
@@ -210,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         query = parse_qs(url.query)
         try:
+            if url.path in ('/tile','/places','/at','/region','/status'):
+                return self.world_request(url.path, query)
             path = Path(os.path.abspath(Path(query.get('path',[self.server.start])[0]).expanduser()))
             if url.path=='/list':
                 hidden = query.get('hidden',['false'])[0]=='true'
@@ -347,10 +389,13 @@ def launch():
     runtimes = sorted((base/'tools').glob('Godot*_linux.x86_64'))
     if not runtimes:
         parser.error('Godot runtime missing from tools/. See README.md.')
-    service = Service(path)
+    service = Service(path, atlas=True)
     thread = threading.Thread(target=service.serve_forever,daemon=True)
     thread.start()
     env = dict(os.environ,BRANCH_API=f'http://127.0.0.1:{service.server_port}',BRANCH_TOKEN=service.token,BRANCH_ROOT=str(path))
+    if 'GALLIUM_DRIVER' not in env and Path('/usr/lib/wsl/lib/libd3d12.so').exists():
+        # WSLg's default OpenGL is llvmpipe (CPU). Mesa's D3D12 driver reaches the real GPU.
+        env['GALLIUM_DRIVER'] = 'd3d12'
     cmd = [str(runtimes[-1]),'--path',str(base/'native')]
     if args.headless:
         cmd.append('--headless')
@@ -380,9 +425,9 @@ def launch():
     signal.signal(signal.SIGINT,stop)
     try:
         # A script parse error means the in-game smoke timer never starts; watch from here.
-        return godot.wait(timeout=150 if args.smoke else None)
+        return godot.wait(timeout=300 if args.smoke else None)
     except subprocess.TimeoutExpired:
-        print('Smoke run exceeded 150 s (a GDScript parse error hangs the run); stopping Godot.')
+        print('Smoke run exceeded 300 s (a GDScript parse error hangs the run); stopping Godot.')
         godot.kill()
         return 3
     finally:
@@ -390,6 +435,8 @@ def launch():
             godot.kill()
         service.shutdown()
         service.server_close()
+        if service.atlas:
+            service.atlas.close()
 
 
 if __name__=='__main__':

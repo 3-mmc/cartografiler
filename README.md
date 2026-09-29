@@ -1,100 +1,117 @@
 # Branch Atlas
 
-A native, local file manager that turns directories into nested landscapes. PDF page counts shape mountain ridges; photographs form woods; audio becomes lakes; videos become waterfalls; tables become fields. The geography is continuous and irregular, with no equal-sized file tiles.
+A native, local file manager in which your whole filesystem is **one continuous world
+map**. Each disk is a continent. Every folder owns a territory sized by what it holds,
+rivers drain toward the parent folder, land cover follows content (photographs grow
+forest, code builds towns), and single files stand as landmarks when you come close.
+The geography is continuous and irregular, with no tiles, board or grid.
 
 ## Run on this machine
 
 ```bash
-cd /home/praetor/branch
-./atlas /home/praetor
-./atlas /mnt/e
+branch-atlas                  # the world, starting over your home folder
+branch-atlas /mnt/e/Photos    # start over any folder
+~/branch/atlas demo           # synthetic demo folder
 ```
 
-Convenience commands `branch-atlas` and `branch-fm` are installed in `~/.local/bin`. A **Branch Atlas** desktop entry starts at your home directory.
+It opens a native **Godot window through WSLg**, rendered on the **GTX 1080** (the
+launcher sets `GALLIUM_DRIVER=d3d12`; without it WSLg falls back to CPU rendering). A
+**Branch Atlas** entry is also in the Windows Start menu. Python starts a private,
+authenticated loopback service and shuts it down when the window closes. No files are
+uploaded.
 
-It opens a native **Godot window through WSLg**. This is not a browser app or a packaged Windows `.exe`. Python starts a private, authenticated loopback service and shuts it down when the window closes. No files are uploaded.
-
-For the synthetic demonstration landscape:
+The first launch surveys the filesystem in the background. On this machine that's 3.65 M
+files and 461 k folders across every drive, in about 16 minutes. The map is usable from
+the first seconds and fills in coarse to fine; unsurveyed places are parchment. To survey
+ahead of time from a terminal:
 
 ```bash
-python3 -m branchfm.demo
-./atlas demo
+python3 -m branchfm.index /          # everything
+python3 -m branchfm.index /mnt/d     # one drive
 ```
 
-The lightweight terminal companion is `./branch /path`. Press `?` there for controls; `m` opens that directory in the native atlas.
+The index lives in `~/.local/share/branch/index.sqlite` (about 1.3 GB for this machine),
+with laid-out territories cached next to it in `layout.sqlite`. Both are rebuilt if deleted.
 
-## The map is the application
+The lightweight terminal companion is `./branch /path`. Press `?` there for controls.
 
-There are no permanent panels. A **cartouche** (top left) names the region, gives the path as a trail of place names, and states its climate and weather. **Field notes** (right) appear when you select something: a preview, the facts, and a *reading* explaining why the landform looks as it does. The **Gazetteer** (`G`) holds the conventional list, filter and paging. Paste and Undo appear only when they apply. Chrome fades while the mouse rests; `F` hides everything but the map.
+## Moving around
 
 | Control | Action |
 |---|---|
-| Click / double-click / Enter | Select · enter a directory (or peek a file) |
-| Backspace · ↑ in the cartouche | Up to the parent region |
-| Right or middle drag · wheel · + / − | Pan · zoom |
-| Z | Parent overview / local view |
-| G or Tab · K or ? · W · Y · L · T · F · I | Gazetteer · legend · weather · time slider · labels · climate override · map only · collapse notes |
+| Drag · wheel · right-drag | Pan · zoom at the cursor · turn and tilt |
+| Click · double-click · Enter | Select · fly there |
+| Backspace · Home | Up to the enclosing place · the whole world |
+| WASD / arrows · Q/E · PgUp/PgDn | Pan · turn · tilt |
+| G · K · R · L · F · I | Gazetteer · legend · weather radar · labels · map only · collapse notes |
 | Ctrl+P · Ctrl+L | Bash navigation palette · type a path |
 | Space · F2 · Delete · Ctrl+C/X/V · Ctrl+Z · Ctrl+Shift+N | Peek · rename · trash · copy/cut/paste · undo · new folder |
 
+The **cartouche** (top left) names the place under the centre of the view and shows the
+survey's progress. **Field notes** (right) appear when you select something. The
+**Gazetteer** lists the place you are over. Chrome fades while the mouse rests.
+
 ## Bash navigation
 
-Ctrl+P runs explicitly submitted commands in the active directory. Bash is real and runs as your user. Enter or **Run** executes; typing alone does not. Paths in stdout become destinations; selecting one triggers a zoom-out / pan / zoom-in journey. A single destination is chosen automatically.
+Ctrl+P runs explicitly submitted commands in the place you are over. Bash is real and runs
+as your user; typing alone never runs anything. Paths in stdout become destinations, and
+choosing one flies you there.
 
 ```bash
-cd ../Photos
 find . -iname '*.pdf'
-find . -type f -print0
 rg --files | grep Uzbekistan
 printf '%s\n' '/mnt/e/Photos/My trip/photo.jpg'
 ```
 
-Commands have a 10-second limit, output is limited to 1 MiB, and results to 200 destinations. Newline and NUL-delimited filenames are supported. `-print0` handles filenames containing newlines. Bash startup files are not loaded, so interactive aliases/functions are not available; installed commands on PATH are.
+Commands have a 10-second limit, 1 MiB of output and 200 destinations. Bash startup
+files are not loaded.
 
 ## Reading the map
 
-The full grammar, with the reasoning behind each choice, is in **[docs/cartography.md](docs/cartography.md)** and in the in-app legend (`K`). In short:
-
-- **Climate is the mount.** Linux-native = temperate, Windows volumes over 9p = tropical, network = wetland, tmpfs/proc = desert, not writable = alpine.
-- **Water flows toward the parent.** Subdirectories are tributaries sized by their item count. Empty folders are dry riverbeds, and cache/generated folders are marshes. Audio are lakes, video waterfalls, and archives glaciers (entries → length, compression → blue ice).
-- **Landform is file type; rock is age.** Paged documents are mountains. Fresh basalt (black, sharp, glowing if changed today) weathers to sandstone terraces and finally worn granite. Images are woodland, tables fields, source settlements, executables obsidian, disk images calderas, and databases wells.
-- **Sea level is disk usage**; past 75% full the coast floods. **Tides** mark cloud files (OneDrive, Proton Drive): cloud-only placeholders are phantom islands, pinned files sit behind dikes, and downloaded ones lie on tidal flats.
-- **Human geography:** roads are worn by your own visits, and git repositories are walled towns with scaffolding for uncommitted work. Sandstone erodes into mesas, buttes and hoodoos. Busy folders cut canyons. Files changed in the last 15 minutes erupt as geysers. Symlinks are natural arches.
-- **Time (`Y`)** replays last-modified times. Folders over 120 entries become **archipelagos**.
-- **Weather is recent activity.** Storms, showers and cumulus for changes this hour, today or this week. Snow for regions untouched for over two years. Fog over unexplored folders.
-
-Directory ancestry creates nested geography. Entering a folder follows its tributary upstream into a real miniature landscape; visited parents and siblings are kept.
+The grammar and its reasoning are in **[docs/cartography.md](docs/cartography.md)** and in
+the app (`K`). In short: continents are disks, climate is the filesystem and write
+permission, territory is size, water flows toward the parent, land cover is content, rock is
+age (basalt → sandstone → granite), snow is dormancy, and the optional radar shows files
+changed today. Features from the earlier nested-map version that haven't yet moved into
+the continuous world are listed there too: tides, sea level, roads, time slider, and
+page-count mountains.
 
 ## Previews and file operations
 
-- Text, JSON, CSV/TSV, images, PDF text (first six pages), audio/video metadata, ZIP/TAR listings, DOCX text, PPTX slide text, and raw XLSX values are supported. Image previews use Pillow. Binary files show a short hex view; devices and pipes are not read.
-- PDF pages are not yet rasterised in the inspector; scanned PDFs may have no text. Audio/video playback uses **Open externally**. Office previews are extracted text/data, not faithful page layouts.
-- Metadata/preview extraction runs in memory- and time-bounded subprocesses. It never executes file contents.
-- Rename, new folder, copy, cut/paste, recoverable trash, and undo of moves/renames/trash are available. Existing destinations are refused. Copy and mkdir are not undoable.
-- Trash lives in `~/.local/share/branch/trash` (or `$XDG_DATA_HOME/branch/trash`). `recovery.tsv` contains JSON-line recovery records for restoration after restarting; the in-app undo stack lasts for the session. This is separate from the Windows Recycle Bin.
+- Text, JSON, CSV/TSV, images, PDF text (first six pages), audio/video metadata, ZIP/TAR
+  listings, DOCX text, PPTX slide text and raw XLSX values are previewed in bounded
+  subprocesses that never execute file contents.
+- Rename, new folder, copy, cut/paste (into the place you are over), recoverable trash, and
+  undo of moves/renames/trash. Existing destinations are refused. Trash is Branch's own
+  store under `~/.local/share/branch/trash`, not the Windows Recycle Bin.
 
-## Scope and dependencies
+## Architecture
 
-This is a working prototype. Large directories are mapped in **600-entry pages** (archipelagos beyond 120), with filtering across the whole directory. It does not recursively scan an entire drive. Geometry is generated from metadata, not proprietary game assets. Label modes, explored geography, and manual climate changes are session-local.
+| Piece | Where |
+|---|---|
+| Survey index and native crawlers (Linux `scandir`, Windows Python worker) | `branchfm/index.py` |
+| World layout: power-diagram territories, fractal borders, rivers, landmarks | `branchfm/world.py` |
+| Terrain synthesis: 257² height/colour/aux tiles at any zoom | `branchfm/tiles.py` |
+| Map service: tiles (worker processes), labels, picking, survey status | `branchfm/atlas_api.py`, `branchfm/service.py` |
+| Native client: streaming terrain, floating origin, overlays | `native/main.gd`, `native/terrain.gdshader` |
 
-Python 3.11+, Godot 4.x, Pillow (optional image support), Poppler (`pdfinfo`, `pdftotext`), and FFmpeg (`ffprobe`) are used. The official Godot 4.7.2 runtime is installed locally under `tools/`; it is excluded from source control. DejaVu fonts are bundled with their licence.
-
-The current WSLg test renderer reports **Mesa llvmpipe (software OpenGL)**. Hardware acceleration has not been verified. The renderer uses Godot's Compatibility backend.
+Tiles are generated on demand in a pool of worker processes, about 0.1 s each once warm.
+The client keeps the view 100 render units wide at any zoom (floating origin) with world
+coordinates in doubles. Territories are laid out lazily, the first time the map needs a
+place's interior, and cached on disk.
 
 ## Validate
 
 ```bash
 python3 -m unittest discover -s tests -v
-./atlas demo --headless --smoke
-./atlas demo --smoke --capture /tmp/branch-atlas.png
+./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --editor --import --quit
+./atlas / --smoke --capture /tmp/world.png
+./atlas / --smoke --capture /tmp/home.png --enter /home/praetor
 ```
-
-The smoke flow exercises directory descent/return, retained parent geography, labels, climate changes, Bash path search, animated travel, and optional screenshot capture. Tests use generated fixtures, not personal documents.
 
 ## References
 
-- [Conrad Barski's spatial file-browser clip](https://x.com/lisperati/status/2104681013909893184): the branching terminal companion.
-- [Mach Speed Intercept](https://store.steampowered.com/app/3438610/Mach_Speed_Intercept/): continuous relief, restrained materials, and free camera movement. Original geometry is generated here.
-- [Godot Camera3D](https://docs.godotengine.org/en/stable/classes/class_camera3d.html): orthographic camera.
+- [Conrad Barski's spatial file-browser clip](https://x.com/lisperati/status/2104681013909893184): the original inspiration.
+- [Mach Speed Intercept](https://store.steampowered.com/app/3438610/Mach_Speed_Intercept/): continuous relief, restrained materials, free camera movement. All geometry and colour here are generated; no game assets are used.
 
 Project-specific agent instructions, machine paths, and accepted design constraints are in `AGENTS.md`.

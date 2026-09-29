@@ -3,58 +3,55 @@
 ## Location and entry points
 
 - Working directory: `/home/praetor/branch` (WSL Debian on the user's Windows machine).
-- Main product: a native Godot 3D file manager, launched with `./atlas /path/to/folder`.
+- Main product: a native Godot file manager showing the **whole filesystem as one continuous world map**, launched with `./atlas [/path/to/start]` (`./atlas /` for the world view).
 - Convenience launchers: `~/.local/bin/branch-atlas` and `~/.local/bin/branch-fm`. Desktop entry: `~/.local/share/applications/branch-atlas.desktop` (starts in `/home/praetor`).
-- Terminal companion: `./branch /path/to/folder`; `m` launches the native atlas.
-- `python3 -m branchfm.demo` creates explicitly synthetic demo files; `./atlas demo` opens them.
+- Terminal companion: `./branch /path/to/folder`.
+- `python3 -m branchfm.demo` creates explicitly synthetic demo files; `./atlas demo` starts over them.
+- Survey from a terminal: `python3 -m branchfm.index /` (or a path).
 - Do not edit `/home/praetor/AGENTS.md` for this project: it is generated from the shared machine instructions.
 
 ## Tools and architecture
 
-- Godot **4.7.2 stable**, official Linux x86_64 binary at `tools/Godot_v4.7.2-stable_linux.x86_64`.
-- GDScript native scene/UI/camera in `native/main.gd`; terrain generation in `native/terrain.gd`.
-- Python **3.13** on this machine. `branchfm/service.py` launches Godot and a token-authenticated, loopback-only HTTP service on an ephemeral port. Closing Godot stops the service.
-- Shared Python filesystem operations: `branchfm/model.py`. Read-only previews: `branchfm/preview.py`. Metadata extraction: `branchfm/atlas.py`.
-- Pillow for image dimensions, EXIF, and thumbnails; Poppler `pdfinfo` / `pdftotext` for PDF page counts / text; FFmpeg `ffprobe` for media metadata.
-- Python standard-library `unittest` tests in `tests/`; Godot's `--smoke` flow checks native navigation and labels, and can capture a rendered PNG.
-- Shell, `rg`, Python scripts, Godot headless checks, and rendered-window screenshots are the development tools. Browser/web research is used for primary documentation and visual references. No sub-agents were used.
-- Native runtime runs through WSLg. The current Linux OpenGL context reports **Mesa llvmpipe**, not the GTX 1080; do not claim hardware acceleration was verified.
-- Official fonts copied from the system: DejaVu Serif and Serif Italic, with their licence in `native/fonts/LICENSE.txt`.
+- Godot **4.7.2 stable**, official Linux x86_64 binary at `tools/Godot_v4.7.2-stable_linux.x86_64`. Compatibility renderer (GL).
+- **GPU:** WSLg's default GL is llvmpipe (CPU). `GALLIUM_DRIVER=d3d12` reaches the GTX 1080 (verified 2026-09-29: "Microsoft - D3D12 (NVIDIA GeForce GTX 1080)"); the launcher sets it. Vulkan/Forward+ still falls back to llvmpipe, because Debian's Mesa ships no Dozen (dzn) ICD.
+- Python **3.13**, numpy 2.2, scipy 1.15. `branchfm/service.py` launches Godot and a token-authenticated, loopback-only HTTP service on an ephemeral port. Closing Godot stops the service.
+- **Survey index** `branchfm/index.py`: SQLite at `$XDG_DATA_HOME/branch/index.sqlite` (≈1.3 GB for 3.65 M files). Breadth-first priority queue (0 viewed, 1 start, 2 home, 3 Linux, 4 Windows drives, 5 streamed drives such as G:). Linux paths via `os.scandir`; `/mnt/<letter>` via a persistent Windows `py.exe` worker (native NTFS: ≈70k entries/s on D:, 7k/s on E: HDD, versus ≈1k/s over 9p) with a 20 s per-listing timeout. Junctions/symlinks are never descended. A full survey is re-run every 12 h at launch (`meta.last_full_survey`).
+- **World layout** `branchfm/world.py`: power-diagram territories on per-directory rasters, seeded by path hash, weights (files+dirs)^0.4 with a 5% floor; lazily computed and cached in `layout.sqlite` (shared by processes, persists). Root: `/mnt` drives promoted to continents (two-stage diagram: continents, then provinces); sea only between disks. Borders: shared world-absolute warp octaves (`warp_offsets`), identical at layout and render time.
+- **Terrain** `branchfm/tiles.py`: 257² edge-inclusive tiles (float32 heights relative to tile base + RGBA colour + RGBA aux: rain, fog, depth, ridge), rendered in a spawn process pool (`atlas_api.py`). Client streams `/tile`, `/places`, `/at`, `/region`, `/status`.
+- **Client** `native/main.gd` + `native/terrain.gdshader`: floating origin (100 render units across the view at any zoom, world coords in doubles), orthographic tilted camera, per-pixel normals from the height texture.
+- Shared filesystem operations: `branchfm/model.py`. Previews: `branchfm/preview.py`. Per-file metadata: `branchfm/atlas.py` (not yet wired into the continuous map).
+- Python standard-library `unittest` tests in `tests/` (`test_world.py` covers index, layout, border consistency, no-cliffs, tile format, continents).
+- Fonts: DejaVu Serif, Serif Italic and Sans (Interface.ttf), with their licence in `native/fonts/LICENSE.txt`.
 
 ## Accepted product direction
 
 - The original inspiration is Conrad Barski's spatial branching file browser: https://x.com/lisperati/status/2104681013909893184 .
-- User initially chose a terminal app, then explicitly chose the native graphical map as the main application. The terminal is now a companion.
-- **Do not build a regular board of equal-sized hex/square tiles.** The user corrected the first prototype: geography should be amorphous, expansive, less cartoonish, and visually informed by **Mach Speed Intercept Playtest's map view**. Civilization V supplied the earlier strategic-camera reference, not a requirement for hex tiles.
-- The reference is installed at `E:\SteamLibrary\steamapps\common\Mach Speed Intercept Playtest` (`/mnt/e/SteamLibrary/steamapps/common/Mach Speed Intercept Playtest`), Steam app `3989450`. Official screenshots are on the parent game's page, https://store.steampowered.com/app/3438610/Mach_Speed_Intercept/ . Inspect broad continuous terrain, irregular ridges, muted materials, free camera movement; do not lift game assets.
-- Directory hierarchy determines geography. Deeper paths are nested regions; entering pans and zooms into existing geography, backing out restores the surroundings. Preserve explored siblings rather than replacing the map with an unrelated island.
-- **The cartographic grammar is in `docs/cartography.md` and is the design contract.** Each system answers one question: climate = mount/filesystem (and write permission), hydrology = directory tree (water flows toward the parent), geology = file type + age (basalt when fresh → granite when old), weather = recent modification activity. Do not let one system borrow another's meaning. Climate is a filesystem fact, never a claim about real-world geography; `T` is a session-only override.
-- File metadata modifies bounded landmark characteristics (see the grammar's tables). Missing metadata must remain unknown and be drawn neutral, never invented.
-- **The map is the application.** No permanent panels: cartouche, tools, gazetteer, field notes and legend are translucent overlays that appear when relevant and fade when idle (accepted 2026-09-28).
-- File/directory names form a cartographic label layer, with all / directories-only / off toggles, zoom-dependent density and collision suppression. The inspector always exposes the real full name.
-- **Ctrl+P** opens an explicitly submitted Bash navigation palette. `cd`, `find`, and pipelines yielding paths drive an animated zoom-out / travel / zoom-in journey. Bash runs as the user; it is not a fake command parser. Never execute palette text automatically while it is being typed.
-- Preview follows selection (field notes appear only while something is selected); Space enlarges it. The conventional list lives in the collapsible Gazetteer (G); path typing via Ctrl+L or the cartouche trail.
+- **One continuous, already-browsable world built from a persistent index** (accepted 2026-09-29): no per-directory islands dropped onto a map. Features blend into one another as in Civilization V and Mach Speed Intercept.
+- **Continents are disks** (user's choice, 2026-09-29): the Linux disk and each drive are separate landmasses across sea; below that, provinces share land borders. Do not turn large folders into archipelagos (tried; it read as cracked tiles).
+- **Do not build a regular board of equal-sized hex/square tiles.** Geography is amorphous, expansive, less cartoonish, visually informed by **Mach Speed Intercept**'s map view (continuous satellite-like ground, dark ridges with strong shadows, restrained palette). Reference install: `/mnt/e/SteamLibrary/steamapps/common/Mach Speed Intercept Playtest`; screenshots via the Steam API for app 3438610. Never lift game assets.
+- **Civilization V assets:** installed at `/mnt/e/SteamLibrary/steamapps/common/Sid Meier's Civilization V` (FPK archives of DDS textures, plus the SDK). Its EULA licenses the software only "for gameplay" and bars derivative works, so do not load or ship its textures, even for prototyping. Use CC0 sources (Poly Haven, ambientCG) or generated materials. Exporting the index as a Civ V map file for use in the game is permitted user-created content.
+- **The cartographic grammar in `docs/cartography.md` is the design contract.** Each system answers one question. The doc lists which earlier features (tides, sea level, roads, towns, time slider, page-count mountains, geysers, arches, canyons, mesas) are designed but not yet ported to the continuous world.
+- Missing metadata remains unknown and is drawn neutral, never invented.
+- **The map is the application.** No permanent panels: translucent overlays that appear when relevant and fade when idle.
+- **Weather is an opt-in radar overlay** (`R`, off by default) with a stated legend. The earlier 3D clouds were hard to read.
+- **Ctrl+P** Bash palette runs only explicitly submitted commands, as the user; output paths become fly-to destinations.
 
 ## Validation and constraints
 
 ```bash
 python3 -m unittest discover -s tests -v
 ./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --editor --import --quit
-./atlas demo --headless --smoke
-./atlas demo --smoke --capture /tmp/branch-atlas.png
-./atlas demo --smoke --capture /tmp/x.png --focus 'Glacier crossing.mp4'   # close-up of one landform
+./atlas / --smoke --capture /tmp/world.png
+./atlas / --smoke --capture /tmp/home.png --enter /home/praetor
 ```
 
-- A GDScript parse error used to hang the smoke run, because its timeout timer lives in the failed script. The launcher now kills Godot after 150 s in `--smoke`, and on SIGTERM/SIGINT. A force-killed Godot window can stay on screen as an unclosable WSLg ghost; `wsl --shutdown` clears it.
-- Capture flags for inspection: `--focus NAME`, `--enter SUBFOLDER`, `--time`, `--legend`.
-- `ERR_CANT_OPEN` from `audio_driver_alsa` in windowed runs is WSLg having no ALSA device; pre-existing and harmless.
-- The demo generator is versioned by `demo/.atlas-demo-v2`; delete `demo/` to regenerate after changing it.
-
-- Sandboxed tools cannot create loopback sockets here; integrated app tests require sandbox escalation. Read-only headless import can emit socket warnings unrelated to script parsing.
+- Smoke runs need the survey index and render real tiles; allow ~10 s warm. The launcher kills Godot after 300 s in `--smoke` (a GDScript parse error otherwise hangs the run) and on SIGTERM/SIGINT. A force-killed Godot window can stay as an unclosable WSLg ghost; `wsl --shutdown` clears it.
+- GDScript's `%` formatting has no `%g`: use `String.num_scientific()` for world coordinates (full double precision).
+- Height terms that differ across a border must vanish at the border (b = 0), and nested detail must fade out at its container's border. Violations showed up as 100:1 cliff walls at deep zoom. `test_terrain_has_no_cliffs` guards this.
+- Rivers are clipped to their own ground (trunk and lower courses to the home district, upper courses to the child); unclipped ancestor rivers carved screen-wide trenches.
+- Interactive survey requests refresh one listing (recursive only if never surveyed). A recursive request from `/` at launch re-crawled everything and starved the UI.
+- Don't `pkill -f` with a pattern that appears in your own command line: it kills the calling shell (exit 144).
+- `ERR_CANT_OPEN` from `audio_driver_alsa` in windowed runs is WSLg having no ALSA device; harmless.
 - Preview/metadata workers are bounded subprocesses. Never execute a file's contents to preview it.
-- File operations refuse collisions. Trash is Branch's own recoverable store under `$XDG_DATA_HOME/branch/trash` (normally `~/.local/share/branch/trash`), not the Windows Recycle Bin. Undo covers moves/renames/trash within a session, not copies or mkdir.
-- The map shows up to 600 entries per page; over 120 becomes an archipelago of glyph islands with no per-file metadata. Be explicit about this limit; it is not an unbounded full-disk renderer.
-- Cloud tides come from `branchfm/cloud.py`: sync roots from `HKLM\...\Explorer\SyncRootManager` (cached per session), attributes via one `powershell.exe -EncodedCommand` per directory (~1 s). Never hydrate files. Verified 2026-09-28 on OneDrive (C:, two E: business accounts) and Proton Drive.
-- Visits (roads) are stored locally in `$XDG_DATA_HOME/branch/visits.json`.
-- Child regions sit at `SEAT` (y 0.13) above the parent's ground. Lower seats get buried under the magnified parent terrain; this showed up with large (archipelago) children.
-- Never copy proprietary game assets into this project. Inspect the reference for visual principles and generate original geometry/materials.
+- File operations refuse collisions. Trash is Branch's own recoverable store under `$XDG_DATA_HOME/branch/trash`, not the Windows Recycle Bin. Undo covers moves/renames/trash within a session, not copies or mkdir.
+- Cloud tides: `branchfm/cloud.py` reads sync roots from `HKLM\...\Explorer\SyncRootManager`; the survey's Windows worker records `st_file_attributes` per entry (`nodes.attrs`), which is what the continuous-map tides will use. Never hydrate files.

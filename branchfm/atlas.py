@@ -35,9 +35,15 @@ SOURCE = {'.py','.js','.ts','.tsx','.jsx','.c','.h','.cpp','.rs','.go','.java','
 
 
 def biome(path):
-    if path.is_dir():
+    return kind_of(path.name, path.is_dir())
+
+
+def kind_of(name, is_dir):
+    """Landform kind from the name alone, so the index can classify without a stat."""
+    if is_dir:
         return 'folders'
-    ext = path.suffix.lower()
+    ext = os.path.splitext(name)[1].lower()
+    path = Path(name)
     if ext=='.pdf':
         return 'pdf'
     if ext in IMAGE or ext in {'.svg','.heic','.avif','.raw','.cr2','.nef'}:
