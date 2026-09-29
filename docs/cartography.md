@@ -153,6 +153,46 @@ PDF collection. As you approach, each landform hands over to that member's own f
 Places named on the map carry what they are when it is clear: *"Kino, video library ·
 55 videos"*.
 
+### Buildings are roles
+
+What a code file *does* decides its building, from its name and where it lives (never its
+contents):
+
+| Building | Stands for | Recognised by |
+|---|---|---|
+| House, in its language's architecture | Source files: Python terracotta gables, JavaScript white flat roofs, C/C++ slate, Rust rust-red, Go blue flat roofs, Java green, shell timber | extension |
+| Town hall on a square | A project's manifest | `pyproject.toml`, `Cargo.toml`, `package.json`, `Makefile`, `Dockerfile`… |
+| Walled town with a keep | A git repository | a `.git` folder |
+| Factory (sawtooth roof, chimney) | Build output | binaries under `build/`, `dist/`, `target/`, `out/`… |
+| Warehouse | Vendored dependencies | under `node_modules`, `site-packages`, `.venv`, `vendor`… |
+| Silo | A database | `.db`, `.sqlite`… |
+| Power station (cooling towers) | AI model weights | `.safetensors`, `.gguf`, `.ckpt`, `.pt`, `.onnx`… |
+| Ruin | Code untouched for three years | modification time |
+
+Build output and model weights form an **industrial quarter** of their folder's town.
+
+### Trees are the climate
+
+The species is the ground, i.e. the disk: broadleaf woods on Linux, jungle and palms on
+Windows drives, conifers where you cannot write (and in snow), shrubs and cacti on virtual
+filesystems. Within a forest the kind of image picks the tree: camera originals (RAW) are
+old oaks, screenshots and small PNGs are shrubs. The season is the age: this year's
+photographs are in leaf, last year's in autumn colours, older ones under snow.
+
+### Landforms
+
+Each is rare by construction; if one appears everywhere its threshold is wrong.
+
+| Landform | Stands for |
+|---|---|
+| Geyser (an animated plume) | A file changed in the last 15 minutes |
+| Volcano with a glowing crater and smoke | A folder of 200+ files, most of which changed this week |
+| Salt flat, white and cracked | An empty folder |
+| Fenced, greyed and hatched ground | A folder the survey could not open |
+| Slot canyon, banded sandstone | A chain of folders each holding only one folder |
+| Natural arch | A symlink or junction (a bridge to elsewhere) |
+| Monument (a gilded obelisk, named at every zoom) | The largest file on each disk |
+
 ### 3D landmarks
 
 Trees, houses and boulders are low-poly models built in the client, instanced on the GPU:
@@ -195,8 +235,7 @@ pending:
 - **Roads** worn by your own visits (still recorded in `visits.json`), and **walled towns**
   for git repositories.
 - **Time slider**: replaying last-modification times.
-- **Geysers** for files changed in the last 15 minutes, **arches** for symlinks, and
-  **canyons** for deeply branching folders.
+- **Canyons** for deeply branching folders (slot canyons for single-folder chains are in).
 
 ## Camera
 

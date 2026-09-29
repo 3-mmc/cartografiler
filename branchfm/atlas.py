@@ -58,6 +58,9 @@ def kind_of(name, is_dir):
         return 'code'
     if ext in {'.zip','.tar','.gz','.tgz','.bz2','.xz','.7z','.rar','.zst','.jar','.whl'}:
         return 'archives'
+    # Model weights: the power stations of the map.
+    if ext in {'.safetensors','.gguf','.ckpt','.pt','.pth','.onnx','.ggml','.tflite','.mlmodel','.keras'}:
+        return 'weights'
     # Compiled caches (.pyc, .class) are neither programs nor content: plain ground.
     if ext in {'.pyc','.pyo','.class'}:
         return 'other'

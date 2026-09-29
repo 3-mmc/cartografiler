@@ -35,7 +35,7 @@ from scipy.spatial import cKDTree
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
-LAYOUT_VERSION = 12          # bump when the layout changes shape, so cached territories are redone
+LAYOUT_VERSION = 13          # bump when the layout changes shape, so cached territories are redone
 
 # ---------------------------------------------------------------- hashing & noise
 
@@ -230,6 +230,8 @@ class Territory:
     falls: bool = False              # its river falls at the outlet (ground changes)
     lakes: list = field(default_factory=list)
     uniform: str | None = None       # a library: most subfolders are made of this one kind
+    repo: bool = False               # holds a .git: a walled town with a keep
+    slot: bool = False               # holds exactly one folder and nothing else: a slot canyon
 
     @property
     def cell(self) -> float:
@@ -502,6 +504,52 @@ def _grid_graph(allowed, cost):
     m = len(flat)
     graph = coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(m, m)).tocsr() if rows else coo_matrix((m, m)).tocsr()
     return graph, ids
+
+
+# Roles: what a file does, from its name and where it lives (never its contents).
+VENDORED = ('/node_modules/', '/site-packages/', '/dist-packages/', '/.venv/', '/venv/', '/vendor/',
+            '/.cargo/registry/', '/go/pkg/mod/', '/bower_components/')
+BUILD_DIRS = ('/build/', '/dist/', '/target/', '/out/', '/bin/', '/obj/', '/Release/', '/Debug/', '/.next/')
+MANIFESTS = {'pyproject.toml', 'setup.py', 'setup.cfg', 'Cargo.toml', 'package.json', 'Makefile', 'CMakeLists.txt',
+             'go.mod', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'Gemfile', 'Dockerfile', 'meson.build',
+             'composer.json', 'project.godot', 'deno.json', 'mix.exs', 'Package.swift'}
+RAW_IMAGES = {'.cr2', '.cr3', '.nef', '.arw', '.dng', '.raf', '.orf', '.rw2', '.raw', '.srw', '.pef'}
+SCREENSHOTS = ('screenshot', 'screen shot', 'bildschirmfoto', 'capture', 'snip', 'grab')
+
+
+def file_role(path: str, name: str, kind: str, size: float, link: bool) -> str:
+    """The building or landform a file becomes, beyond its kind: a town hall for a project
+    manifest, a factory for build output, a warehouse for vendored code, a silo for a
+    database, a power station for model weights, an arch for a link."""
+    if link:
+        return 'arch'
+    ext = os.path.splitext(name)[1].lower()
+    if kind == 'weights':
+        return 'power'
+    if name in MANIFESTS:
+        return 'hall'
+    if kind == 'binaries' and any(d in path for d in BUILD_DIRS):
+        return 'factory'
+    if kind in ('code', 'databases', 'binaries') and any(v in path for v in VENDORED):
+        return 'depot'
+    if kind == 'databases':
+        return 'silo'
+    if kind == 'code':
+        return 'house'
+    if kind == 'images':
+        if ext in RAW_IMAGES:
+            return 'oak'
+        if name.lower().startswith(SCREENSHOTS) or (ext == '.png' and size < 300_000):
+            return 'shrub'
+    return ''
+
+
+def climate(zone: str, writable: bool) -> str:
+    """Virtual filesystems are desert whatever their permissions; otherwise ground you
+    cannot write is alpine."""
+    if zone == 'ephemeral':
+        return zone
+    return zone if writable else 'alpine'
 
 
 def _kind_bytes(row) -> dict:
@@ -980,6 +1028,9 @@ class World:
                       version=self.index.version)
         t.child_by_label = {c['label']: c for c in children}
         t.uniform = self._uniform(children)
+        # A git repository is a walled town; a folder holding only one folder is a slot canyon.
+        t.repo = any(r['name'] == '.git' for r in subdirs)
+        t.slot = parent is not None and len(subdirs) == 1 and not files
         if continental:
             # Distance to the coastline from either side: beaches on land, depth at sea.
             land = (labels != SEA) & (labels != OUT)
@@ -1132,6 +1183,7 @@ class World:
                     fan.append(tip)
                 lakes.append({'x': apex[0], 'y': apex[1], 'r': L, 'seed': h, 'delta': (float(d[0]), float(d[1]))})
         for r in rivers:
+            r['canyon'] = t.slot
             p = r['pts']
             wmax = float(np.max(r['w']))
             r['width'] = wmax
@@ -1182,12 +1234,20 @@ class World:
             counts[kd] = counts.get(kd, 0)+1
             weight[kd] = weight.get(kd, 0)+float(sz)
         dom, share = dominant_kind(counts, weight)
+        roles = [file_role(r['path'], r['name'], kd, sz, bool(r['link'])) for r, kd, sz in zip(files, kinds, sizes)]
         companion = np.zeros(count, dtype=bool)
         if dom not in (None, 'other', 'folders') and share >= 0.5:
             for i, kd in enumerate(kinds):
-                if kd == 'other' or (kd in ('images', 'documents') and counts[kd] <= 3 and dom != kd):
+                if roles[i] in ('', 'shrub') and (kd == 'other' or (kd in ('images', 'documents') and counts[kd] <= 3 and dom != kd)):
                     companion[i] = True
         layout_kind = [dom if companion[i] else kd for i, kd in enumerate(kinds)]
+        # Build output and model weights make an industrial quarter; a manifest stands in town.
+        has_code = 'code' in counts
+        for i, role in enumerate(roles):
+            if role in ('factory', 'power'):
+                layout_kind[i] = 'industry'
+            elif role == 'hall' and has_code:
+                layout_kind[i] = 'code'
         groups = {}
         for i, kd in enumerate(layout_kind):
             groups.setdefault(kd, []).append(i)
@@ -1254,7 +1314,7 @@ class World:
             patches.append({'kind': kd, 'n': primary, 'companions': m-primary, 'x': float(region[:, 0].mean()),
                             'y': float(region[:, 1].mean()), 'side': math.sqrt(area), 'bytes': float(sizes[members].sum())})
         return {'n': count, 'ids': [r['id'] for r in files], 'names': [r['name'] for r in files], 'paths': [r['path'] for r in files],
-                'kinds': kinds, 'layout_kinds': layout_kind, 'companion': companion,
+                'kinds': kinds, 'layout_kinds': layout_kind, 'companion': companion, 'roles': roles,
                 'x': X, 'y': Y, 'r': R, 'rf': RF, 'size': sizes, 'patch': patch, 'patches': patches,
                 'mtime': np.array([r['mtime'] or 0 for r in files]), 'attrs': np.array([r['attrs'] or 0 for r in files]),
                 'link': [bool(r['link']) for r in files], 'is_dir': [bool(r['is_dir']) for r in files]}

@@ -198,6 +198,33 @@ class WorldTests(unittest.TestCase):
         finally:
             world.store.close()
 
+    def test_roles_become_buildings_and_landforms(self):
+        from branchfm.world import file_role
+        self.assertEqual(file_role('/p/pyproject.toml', 'pyproject.toml', 'other', 1, False), 'hall')
+        self.assertEqual(file_role('/p/model.safetensors', 'model.safetensors', 'weights', 1e9, False), 'power')
+        self.assertEqual(file_role('/p/target/release/app', 'app', 'binaries', 1e6, False), 'factory')
+        self.assertEqual(file_role('/p/node_modules/x/index.js', 'index.js', 'code', 1e3, False), 'depot')
+        self.assertEqual(file_role('/p/app.db', 'app.db', 'databases', 1e6, False), 'silo')
+        self.assertEqual(file_role('/p/link', 'link', 'other', 0, True), 'arch')
+        self.assertEqual(file_role('/p/IMG_1.CR2', 'IMG_1.CR2', 'images', 3e7, False), 'oak')
+        self.assertEqual(file_role('/p/Screenshot 1.png', 'Screenshot 1.png', 'images', 9e5, False), 'shrub')
+        # A git repository is a walled town; a folder holding only one folder, a slot canyon.
+        repo = self.tree/'repo'
+        (repo/'.git').mkdir(parents=True)
+        (repo/'pyproject.toml').touch()
+        (repo/'main.py').touch()
+        (self.tree/'chain'/'a'/'b').mkdir(parents=True)
+        (self.tree/'chain'/'a'/'b'/'x.txt').touch()
+        survey(self.index, self.tree)
+        world = World(self.index)
+        try:
+            t = world.territory_for(str(repo))
+            self.assertTrue(t.repo)
+            self.assertIn('hall', t.places['roles'])
+            self.assertTrue(world.territory_for(str(self.tree/'chain')).slot)
+        finally:
+            world.store.close()
+
     def test_continents_end_in_deltas(self):
         root = self.world.root()
         self.assertTrue(any('delta' in lake for lake in root.lakes) or root.mouth is None)

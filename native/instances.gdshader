@@ -13,13 +13,21 @@ uniform float height_offset = 0.0;
 uniform float sink = 0.0;
 uniform vec3 fixed_colour : source_color = vec3(0.30, 0.24, 0.18);   // trunks, walls
 uniform float appear = 1.0;      // shrinks models in as the tile arrives
+uniform float animate = 0.0;     // steam: geysers and volcanic smoke billow
 
 varying float part;
 varying vec3 tint;
 
 void vertex() {
 	vec3 o = MODEL_MATRIX[3].xyz;
-	vec3 local = (MODEL_MATRIX * vec4(VERTEX, 0.0)).xyz * appear;
+	vec3 v = VERTEX;
+	if (animate > 0.0) {
+		float phase = o.x * 97.0 + o.z * 53.0;
+		v.y *= 0.85 + 0.2 * sin(TIME * 2.3 + phase);
+		v.xz *= 1.0 + 0.18 * sin(TIME * 1.7 + v.y * 6.0 + phase);
+		v.x += 0.06 * sin(TIME * 0.9 + phase) * v.y;
+	}
+	vec3 local = (MODEL_MATRIX * vec4(v, 0.0)).xyz * appear;
 	vec3 p = vec3(tile_origin.x + (o.x + local.x) * tile_render,
 	              o.y * tile_world * height_scale + height_offset - sink + local.y * tile_render,
 	              tile_origin.y + (o.z + local.z) * tile_render);

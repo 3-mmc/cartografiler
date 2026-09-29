@@ -7,8 +7,12 @@ extends Node3D
 const TERRAIN_SHADER = preload("res://terrain.gdshader")
 const INSTANCE_SHADER = preload("res://instances.gdshader")
 const MODELS = preload("res://models.gd")
-# Fixed (untinted) colour per instance kind: trunks, trunks, walls, rock.
-const MODEL_FIXED = [Color(0.30, 0.24, 0.18), Color(0.28, 0.22, 0.16), Color(0.80, 0.76, 0.68), Color(0.5, 0.48, 0.45)]
+# Fixed (untinted) colour per model (MODEL_NAMES in branchfm/tiles.py): trunks, walls, stone.
+const MODEL_FIXED = [Color(0.30, 0.24, 0.18), Color(0.28, 0.22, 0.16), Color(0.80, 0.76, 0.68), Color(0.5, 0.48, 0.45),
+	Color(0.45, 0.36, 0.26), Color(0.36, 0.5, 0.3), Color(0.3, 0.26, 0.2), Color(0.28, 0.22, 0.16), Color(0.86, 0.82, 0.74),
+	Color(0.55, 0.5, 0.46), Color(0.62, 0.62, 0.6), Color(0.8, 0.79, 0.76), Color(0.6, 0.58, 0.56), Color(0.62, 0.58, 0.52),
+	Color(0.84, 0.78, 0.66), Color(0.6, 0.57, 0.52), Color(0.95, 0.96, 0.96), Color(0.7, 0.66, 0.58), Color(0.7, 0.46, 0.3)]
+const STEAM_MODEL = 16
 const FOV = 38.0                # horizontal field of view in perspective
 const SERIF = preload("res://fonts/Cartography.ttf")
 const ITALIC = preload("res://fonts/CartographyItalic.ttf")
@@ -675,7 +679,8 @@ func build_models(body: PackedByteArray, offset: int) -> Array:
 	var count = body.decode_u32(offset)
 	offset += 4
 	if count == 0 or body.size() < offset+count*24: return out
-	var per_kind = [[], [], [], []]
+	var per_kind = []
+	for i in MODEL_FIXED.size(): per_kind.append([])
 	for i in count:
 		var o = offset+i*24
 		var kind = body[o+16]
@@ -700,6 +705,7 @@ func build_models(body: PackedByteArray, offset: int) -> Array:
 		var m = ShaderMaterial.new()
 		m.shader = INSTANCE_SHADER
 		m.set_shader_parameter("fixed_colour", MODEL_FIXED[kind])
+		m.set_shader_parameter("animate", 1.0 if kind == STEAM_MODEL else 0.0)
 		mmi.material_override = m
 		# Placed in the shader, so the CPU must not cull by the (unit-sized) instance bounds.
 		mmi.custom_aabb = AABB(Vector3(-1e5, -1e5, -1e5), Vector3(2e5, 2e5, 2e5))
@@ -1254,9 +1260,17 @@ func reading_for_region(p: Dictionary) -> String:
 	return text
 
 func reading_for_file(p: Dictionary) -> String:
-	var forms = {"pdf":"A peak of the massif; its rock shows age (dark basalt when new, pale granite when old).", "images":"A stand of the forest.",
-		"audio":"A reed bed with pools.", "video":"A mesa of banded strata: film is banded in frames, and a long one stands tall.", "tables":"A field.", "code":"A city block.", "databases":"A city block with slate roofs.",
-		"archives":"A tongue of the glacier.", "binaries":"An obsidian flow.", "disks":"A caldera.", "documents":"A meadow in flower.", "other":"Scrub with a cairn."}
+	var roles = {"hall":"The town hall: this project's manifest.", "power":"A power station: AI model weights.",
+		"factory":"A factory: build output.", "depot":"A warehouse: a dependency brought in from elsewhere.",
+		"silo":"A silo: a database.", "arch":"A natural arch: a link to somewhere else.",
+		"oak":"An old oak: a camera original (RAW).", "shrub":"A shrub: a screenshot or small image."}
+	var role = String(p.get("role", ""))
+	if roles.has(role): return roles[role]
+	var forms = {"pdf":"A peak of the massif; its rock shows age (dark basalt when new, pale granite when old).", "images":"A stand of the forest; its leaves turn with age.",
+		"audio":"A reed bed with pools.", "video":"A mesa of banded strata: film is banded in frames, and a long one stands tall.", "tables":"A field.",
+		"code":"A house in town; the architecture is the language, and code untouched for three years stands in ruins.", "databases":"A silo.",
+		"archives":"A tongue of the glacier.", "binaries":"An obsidian flow.", "disks":"A caldera.", "documents":"A meadow in flower.",
+		"weights":"A power station: AI model weights.", "other":"Scrub with a cairn."}
 	return forms.get(p.get("kind", "other"), "A cairn.")
 
 func deselect():
@@ -1361,6 +1375,15 @@ Every folder's water leaves at its outlet and runs down the valleys between prov
 
 [color=#d9c68f][b]Land cover is content[/b][/color]
 A folder's own files lie as fields: each kind is one patch (a forest of images, a field system of tables, a town of source files) and each file one parcel of it, in alphabetical order across the patch. Far off, a patch is one colour; closer, it divides into fields with hedgerows, city blocks with streets, the peaks of a massif (PDFs, rock by age), a crevassed glacier (archives), mesas of banded strata (video), reed beds and pools (audio), obsidian flows (executables), calderas (disk images), flowering meadow (documents) and scrub with cairns (anything else).
+
+[color=#d9c68f][b]Buildings are roles[/b][/color]
+Houses are source files, built in their language's style (Python terracotta, JavaScript white flat roofs, C slate, Rust rust-red, Go blue). A town hall stands for a project's manifest, a walled town with a keep for a git repository, factories for build output, warehouses for vendored dependencies, silos for databases, power stations for AI model weights. Code untouched for three years stands in ruins.
+
+[color=#d9c68f][b]Trees are the climate[/b][/color]
+Broadleaf woods on Linux, jungle and palms on Windows drives, conifers where you cannot write, cacti on virtual filesystems. Camera originals (RAW) grow as old oaks, screenshots as shrubs; photographs turn autumnal after a year.
+
+[color=#d9c68f][b]Landforms[/b][/color]
+Geysers: files changed in the last 15 minutes. Volcano: most of a folder changed this week. Salt flat: an empty folder. Fenced ground: a folder that could not be read. Slot canyon: a chain of folders each holding one folder. Natural arch: a link. Monument: the largest file on each disk.
 
 [color=#d9c68f][b]Rock is age, snow is dormancy[/b][/color]
 Ridgelines show the age of their region: dark basalt when changed recently, sandstone within three years, pale granite when old. Regions untouched for over two years are snowbound.

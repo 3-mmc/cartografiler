@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import time
 from functools import lru_cache
@@ -29,7 +30,7 @@ import numpy as np
 
 from .index import NO_CRAWL
 
-from .world import FIRST_CHILD, HOME, OUT, SEA, GridNoise, World, _bilinear, coast_distance, content_shares, fbm, label_at, lattice, stable_hash, value_noise
+from .world import BUILD_DIRS, VENDORED, FIRST_CHILD, climate, HOME, OUT, SEA, GridNoise, World, _bilinear, coast_distance, content_shares, fbm, label_at, lattice, stable_hash, value_noise
 
 N = 257
 DAY = 86400.0
@@ -52,6 +53,7 @@ PARCHMENT = np.array((206, 194, 162), dtype=np.float64)
 
 # Land cover from content: what a place holds decides what grows there.
 COVER_OF = {'images': 'forest', 'video': 'canyon', 'tables': 'field', 'code': 'town', 'databases': 'town',
+            'weights': 'town', 'industry': 'town',
             'pdf': 'meadow', 'documents': 'meadow', 'audio': 'wet', 'archives': 'ice', 'binaries': 'rock',
             'disks': 'rock', 'other': 'dry', 'folders': 'dry'}
 COVERS = ('meadow', 'forest', 'field', 'town', 'wet', 'ice', 'rock', 'dry', 'canyon')
@@ -68,11 +70,38 @@ COVER_MAT[COVERS.index('canyon'), ROCK] = 0.4
 
 ROCK_LIMITS = np.array([lim for lim, _ in ROCK_BY_AGE[:-1]])
 ROCK_LUT = np.array([c for _, c in ROCK_BY_AGE], dtype=np.float64)
-KIND_NAMES = ('pdf', 'images', 'video', 'audio', 'tables', 'code', 'databases', 'archives', 'binaries', 'disks', 'documents', 'other')
+KIND_NAMES = ('pdf', 'images', 'video', 'audio', 'tables', 'code', 'databases', 'archives', 'binaries', 'disks', 'documents',
+              'other', 'industry', 'weights')
 KIND_CODE = {k: i for i, k in enumerate(KIND_NAMES)}
 SYMBOL_KINDS = ('video', 'pdf', 'images', 'archives', 'audio', 'code')
 # 3D instances the client draws (native/models.gd builds the meshes, in this order).
-BROADLEAF, CONIFER, HOUSE, BOULDER = range(4)
+MODEL_NAMES = ('broadleaf', 'conifer', 'house', 'boulder', 'palm', 'cactus', 'shrub', 'oak', 'flat_house', 'factory',
+               'warehouse', 'silo', 'power_station', 'ruin', 'town_hall', 'keep', 'steam', 'obelisk', 'arch')
+(BROADLEAF, CONIFER, HOUSE, BOULDER, PALM, CACTUS, SHRUB, OAK, FLAT, FACTORY, WAREHOUSE, SILO, POWER, RUIN, HALL,
+ KEEP, STEAM, OBELISK, ARCH) = range(len(MODEL_NAMES))
+SP = 3                          # instance grid spacing, in tile samples
+ROLE_CODE = {'': 0, 'house': 1, 'depot': 2, 'factory': 3, 'silo': 4, 'power': 5, 'hall': 6, 'arch': 7, 'oak': 8, 'shrub': 9}
+# Architecture is the language: a Python town has terracotta gables, a JavaScript town white
+# flat roofs, C and C++ slate, Rust rust-red, Go blue flat roofs, Java green, shell timber.
+LANG_STYLE = {}
+for _exts, _model, _roof in (
+        (('.py', '.pyi', '.ipynb'), 'house', (168, 92, 64)),
+        (('.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '.vue', '.svelte'), 'flat_house', (226, 220, 204)),
+        (('.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hh'), 'house', (96, 104, 116)),
+        (('.rs',), 'house', (140, 72, 52)),
+        (('.go',), 'flat_house', (120, 150, 170)),
+        (('.java', '.kt', '.scala', '.groovy'), 'house', (80, 110, 84)),
+        (('.rb', '.erb'), 'house', (150, 50, 56)),
+        (('.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd'), 'house', (118, 90, 62)),
+        (('.html', '.css', '.scss', '.sass', '.less'), 'flat_house', (214, 178, 120)),
+        (('.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.xml'), 'flat_house', (170, 170, 160)),
+        (('.gd', '.cs', '.fs'), 'house', (110, 86, 140)),
+        (('.lua', '.php', '.swift', '.lisp', '.clj', '.el', '.hs', '.ml'), 'house', (146, 120, 90))):
+    for _e in _exts:
+        LANG_STYLE[_e] = (MODEL_NAMES.index(_model), _roof)
+ZONE_CODE = {'native': 0, 'windows': 1, 'network': 2, 'ephemeral': 3, 'alpine': 4}
+AUTUMN = np.array([(176, 108, 48), (196, 152, 60), (152, 70, 44)], dtype=np.float64)
+VOLCANO = 100                   # symbol code for an erupting folder (not a file kind)
 MAX_INSTANCES = 12000
 INSTANCE = np.dtype([('u', '<f4'), ('v', '<f4'), ('h', '<f4'), ('s', '<f4'), ('kind', 'u1'), ('yaw', 'u1'),
                      ('rgb', 'u1', 3), ('pad', 'u1', 3)])
@@ -197,6 +226,7 @@ class Synth:
                 if m.any():
                     k = idx[m]
                     leaf_kind[k] = 0
+                    leaf_bd[k] = bd[m]
                     leaves.append((T, self._aggregate(T, side_T)))
                     leaf_ref[k] = len(leaves)-1
                 # Relief of every child, tiny ones included. Anything that differs between the
@@ -235,6 +265,7 @@ class Synth:
                             H[kc] += 0.014*scc*(hills+0.35)*smoothstep(0, 0.3*scc, b[child])*f[child]
                         inland = np.ones(k.size, dtype=bool)
                         show = smoothstep(300, 900, side_T/px)*(1-smoothstep(3000, 9000, side_T/px))
+                        self._volcanoes(T, k, b, sc, pk[relief], inv[relief], entries, f, xs, ys, px, H, symbol)
                         if T.uniform:
                             # A library is one landscape: no divides between its members, and
                             # each member stands as one landform of the library's kind.
@@ -294,6 +325,7 @@ class Synth:
                     # desert, not terra incognita.
                     surveyed = np.array([bool(e and (e['scanned'] or e['files'] or e['dirs'] or e['path'] in NO_CRAWL)) for e in entries])
                     leaf_kind[kk] = np.where(surveyed[sub_inv[leafy]], 0, 3)
+                    leaf_bd[kk] = b_child[leafy]
             if next_idx:
                 active = np.concatenate(next_idx)
                 current[active] = np.concatenate(next_ids)
@@ -315,8 +347,11 @@ class Synth:
         lap('detail')
         mat = np.zeros((M, len(MATERIALS)))
         self._planned = np.zeros(M, dtype=bool)   # pixels whose houses come from their lots
-        self._lots = []
-        colour = self._colour(xs, ys, px, H, ridge, water, depth, leaf_kind, leaf_ref, leaves, now, coast, mat)
+        self._lots = []                           # rows: x, y, size, yaw, r, g, b, model
+        self._species = np.full(M, -1, dtype=np.int64)   # tree species set by the files there
+        self._leaf_info(leaves, now)
+        self._children_landforms(visited, descended, x0, y0, S, px, now)
+        colour = self._colour(xs, ys, px, H, ridge, water, depth, leaf_kind, leaf_ref, leaves, now, coast, mat, leaf_bd)
         lap('colour')
         self._symbol_colour(symbol, colour, mat, H, px)
         rain = self._rain(leaf_ref, leaves, M)
@@ -332,7 +367,7 @@ class Synth:
 
         base = float(H.min())
         mat *= (water < 0.5)[:, None]
-        instances = self._instances(tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind)
+        instances = self._instances(tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind, leaf_ref)
         lap('instances')
         mat = np.clip(mat*255, 0, 255).astype(np.uint8)
         return {'level': level, 'x': tx, 'y': ty, 'base': base, 'instances': instances,
@@ -341,12 +376,12 @@ class Synth:
                 'aux': np.stack([np.clip(rain*255, 0, 255), np.clip(fog*255, 0, 255), np.clip(depth*255, 0, 255), np.clip(ridge*255, 0, 255)], axis=1).astype(np.uint8).reshape(N, N, 4),
                 'mat_a': mat[:, :4].reshape(N, N, 4).copy(), 'mat_b': mat[:, 4:].reshape(N, N, 4).copy()}
 
-    def _instances(self, tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind):
+    def _instances(self, tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind, leaf_ref):
         """3D landmarks for the client to instance: trees where the ground is forest, houses
         on town ground (from the actual lots where a town of files is drawn), boulders on bare
         rock. Positions are tile-relative; sizes are map symbols (a few samples), like Civ's
         trees, so a forest reads as a forest at every zoom."""
-        sp = 3
+        sp = SP
         g = np.arange(0, N-1, sp)
         I, J = np.meshgrid(g, g)
         I, J = I.ravel().astype(np.int64), J.ravel().astype(np.int64)
@@ -361,16 +396,38 @@ class Synth:
         # Only where a cover clearly dominates, so models gather in clumps (a wood, a village)
         # instead of sprinkling every mixed patch.
         tree = ok & (r[2] < np.clip((forest-0.35)*1.8, 0, 0.97))
-        kind[tree] = np.where(r[3][tree] < 0.22+snow[tree]*2.5, CONIFER, BROADLEAF)
-        house = ok & ~tree & (r[4] < np.clip((town-0.45)*1.6, 0, 0.85)) & ~self._planned[k]
-        kind[house] = HOUSE
+        # The trees are the climate, i.e. the disk: broadleaf woods on Linux, jungle and palms
+        # on Windows drives, conifers where you cannot write, cacti on virtual filesystems.
+        zone = self._leaf_zone[leaf_ref[k]]
+        pick = r[3]
+        species = np.select([snow > 0.2, zone == ZONE_CODE['alpine'],
+                             (zone == ZONE_CODE['windows']) & (pick < 0.4), zone == ZONE_CODE['windows'],
+                             (zone == ZONE_CODE['network']) & (pick < 0.35),
+                             (zone == ZONE_CODE['ephemeral']) & (pick < 0.6), zone == ZONE_CODE['ephemeral'],
+                             pick < 0.22],
+                            [CONIFER, CONIFER, PALM, BROADLEAF, SHRUB, CACTUS, SHRUB, CONIFER], BROADLEAF)
+        species = np.where(self._species[k] >= 0, self._species[k], species)
+        kind[tree] = species[tree]
+        desert = ok & ~tree & (zone == ZONE_CODE['ephemeral']) & (mat[k, SAND] > 0.5) & (r[4] < 0.04)
+        kind[desert] = CACTUS
+        house = ok & ~tree & ~desert & (r[4] < np.clip((town-0.5)*1.2, 0, 0.55)) & ~self._planned[k]
+        # Villages far off take the role of the place they stand in: warehouses among
+        # vendored dependencies, factories in build output.
+        lref = leaf_ref[k]
+        kind[house] = np.where(self._leaf_vendored[lref][house], WAREHOUSE, np.where(self._leaf_build[lref][house], FACTORY, HOUSE))
         boulder = ok & ~tree & ~house & (r[4] < np.clip((rock-0.5)*0.25, 0, 0.12))
         kind[boulder] = BOULDER
         keep = kind >= 0
-        size = np.where(kind == HOUSE, 1.25, np.where(kind == BOULDER, 0.7, 1.15+0.5*r[3]))*sp*px
+        building = (kind == HOUSE) | (kind == WAREHOUSE) | (kind == FACTORY)
+        size = np.where(building, 1.25, np.where(kind == BOULDER, 0.7, np.where(kind == OAK, 1.7, np.where(kind == SHRUB, 0.8,
+                        np.where(kind == PALM, 1.5, 1.15+0.5*r[3])))))*sp*px
         tint = colour[k, :3]*np.where(kind[:, None] == BOULDER, 0.95, 1.08)
         roofs = ROOFS[(r[3]*len(ROOFS)).astype(np.int64) % len(ROOFS)]
         tint = np.where(kind[:, None] == HOUSE, roofs, tint)
+        tint = np.where(kind[:, None] == WAREHOUSE, np.array((132, 140, 148)), tint)
+        tint = np.where(kind[:, None] == FACTORY, np.array((148, 92, 70)), tint)
+        tint = np.where(kind[:, None] == CACTUS, np.array((92, 128, 78)), tint)
+        tint = np.where(kind[:, None] == PALM, tint*0.4+np.array((118, 150, 66))*0.6, tint)   # palms: lighter fronds
         u, v, hh = fx[keep]/(N-1), fy[keep]/(N-1), H[k[keep]]
         kinds, sizes, yaws, tints = kind[keep], size[keep], r[4][keep]*math.tau, tint[keep]
         if self._lots:
@@ -383,11 +440,23 @@ class Synth:
             u = np.concatenate([u, (lots[:, 0]-x0)/S])
             v = np.concatenate([v, (lots[:, 1]-y0)/S])
             hh = np.concatenate([hh, H[lj*N+li]])
-            kinds = np.concatenate([kinds, np.full(len(lots), HOUSE)])
-            # A house is a map symbol too: a wide lot gets a house of symbol size, not a hangar.
-            sizes = np.concatenate([sizes, np.clip(lots[:, 2]*1.4, 2.5*px, 1.6*sp*px)])
+            kinds = np.concatenate([kinds, lots[:, 7].astype(np.int64)])
+            # Buildings are map symbols too: sizes were capped where each lot was made.
+            sizes = np.concatenate([sizes, lots[:, 2]])
             yaws = np.concatenate([yaws, -lots[:, 3]])
             tints = np.vstack([tints, lots[:, 4:7]])
+        for m in self._monuments():
+            # The largest file on each disk stands as a monument, visible at every zoom.
+            if x0 <= m['x'] < x0+S and y0 <= m['y'] < y0+S:
+                i = min(int((m['x']-x0)/px), N-1)
+                j = min(int((m['y']-y0)/px), N-1)
+                u = np.append(u, (m['x']-x0)/S)
+                v = np.append(v, (m['y']-y0)/S)
+                hh = np.append(hh, H[j*N+i])
+                kinds = np.append(kinds, OBELISK)
+                sizes = np.append(sizes, 9.0*sp*px)
+                yaws = np.append(yaws, 0.0)
+                tints = np.vstack([tints, np.array((212, 184, 110))])
         order = np.argsort(-sizes, kind='stable')[:MAX_INSTANCES]
         out = np.zeros(len(order), dtype=INSTANCE)
         out['u'], out['v'] = u[order], v[order]
@@ -397,6 +466,124 @@ class Synth:
         out['yaw'] = (np.mod(yaws[order], math.tau)/math.tau*255).astype(np.uint8)
         out['rgb'] = np.clip(tints[order], 0, 255).astype(np.uint8)
         return out
+
+    def _leaf_info(self, leaves, now):
+        """Per-leaf facts for the landforms: climate zone, dependency or build ground, an
+        empty folder (a salt flat), a folder the survey could not open (fenced)."""
+        L = len(leaves)
+        self._leaf_zone = np.zeros(L, dtype=np.int64)
+        self._leaf_vendored = np.zeros(L, dtype=bool)
+        self._leaf_build = np.zeros(L, dtype=bool)
+        self._leaf_empty = np.zeros(L, dtype=bool)
+        self._leaf_fenced = np.zeros(L, dtype=bool)
+        for i, (T, entry) in enumerate(leaves):
+            if entry is not None and T.path == '/':
+                zone = self.zone(entry['path'])
+            else:
+                zone = climate(T.zone, T.writable)
+            self._leaf_zone[i] = ZONE_CODE.get(zone, 0)
+            path = (entry['path'] if entry is not None else T.path)+'/'
+            self._leaf_vendored[i] = any(v in path for v in VENDORED)
+            self._leaf_build[i] = any(b in path for b in BUILD_DIRS)
+            if entry is not None and entry.get('label') is not None:
+                self._leaf_empty[i] = bool(entry['scanned']) and not entry['files'] and not entry['dirs'] and not entry.get('error')
+                self._leaf_fenced[i] = bool(entry.get('error'))
+            elif entry is None and T.path != '/':
+                # A place drawn as its own territory: empty when it holds nothing at all.
+                self._leaf_empty[i] = bool(T.node.get('scanned')) and not T.children and not T.places.get('n')
+                self._leaf_fenced[i] = bool(T.node.get('error'))
+
+    def _children_landforms(self, visited, descended, x0, y0, S, px, now):
+        """Geysers where files changed in the last 15 minutes, smoke over erupting folders:
+        drawn for places too small to show their own fields."""
+        for T in visited.values():
+            inside = descended.get(T.node_id, set())
+            for c in T.children:
+                if c['label'] in inside or c['side'] < 4*px:
+                    continue
+                x, y = c['centroid']
+                if not (x0 <= x < x0+S and y0 <= y < y0+S):
+                    continue
+                if now-(c['newest'] or 0) < 900:
+                    self._lots.append(np.array([[x, y, 1.3*SP*px, 0.0, 236, 240, 238, STEAM]]))
+                if _volcanic(c):
+                    self._lots.append(np.array([[x, y, 1.8*SP*px, 0.0, 84, 80, 78, STEAM]]))
+
+    def _file_landforms(self, T, pl, roles, x0, y0, S, px, now):
+        """Single landmarks at a file's site: a town hall for a project manifest, a power
+        station for model weights, an arch for a link, a geyser for a file changed in the last
+        15 minutes, and a keep at the heart of a git repository."""
+        n = pl['n']
+        x, y, rf = pl['x'], pl['y'], pl.get('rf', pl['r'])
+        inside = (x >= x0) & (x < x0+S) & (y >= y0) & (y < y0+S) & (rf/px >= 2.0)
+        rows = []
+        for role, model, lo, hi, tint in ((ROLE_CODE['hall'], HALL, 3, 2.4, (150, 96, 70)),
+                                          (ROLE_CODE['power'], POWER, 4, 3.2, (208, 204, 196)),
+                                          (ROLE_CODE['arch'], ARCH, 3, 2.0, (184, 118, 78))):
+            for i in np.flatnonzero(inside & (roles == role)):
+                rows.append([x[i], y[i], float(np.clip(rf[i]*0.9, lo*px, hi*SP*px)), (i*2.4) % math.tau, *tint, model])
+        for i in np.flatnonzero(inside & (now-pl['mtime'] < 900)):
+            rows.append([x[i]+rf[i]*0.25, y[i], 1.3*SP*px, 0.0, 236, 240, 238, STEAM])
+        if T.repo:
+            town = [q for q in pl.get('patches', []) if q['kind'] == 'code']
+            if town and x0 <= town[0]['x'] < x0+S and y0 <= town[0]['y'] < y0+S and town[0]['side']/px > 6:
+                rows.append([town[0]['x'], town[0]['y'], 2.2*SP*px, 0.4, 176, 60, 52, KEEP])
+        if rows:
+            self._lots.append(np.array(rows, dtype=np.float64))
+
+    @staticmethod
+    def _lot_models(fi, roles, style_model, style_roof, age_file):
+        """Which building stands on each lot: the file's role, then its language's
+        architecture; code untouched for three years stands in ruins."""
+        role = roles[fi]
+        model = style_model[fi].copy()
+        tint = style_roof[fi].copy()
+        for code, m, t in ((ROLE_CODE['depot'], WAREHOUSE, (132, 140, 148)), (ROLE_CODE['factory'], FACTORY, (148, 92, 70)),
+                           (ROLE_CODE['silo'], SILO, (206, 200, 188))):
+            sel = role == code
+            model[sel] = m
+            tint[sel] = t
+        old = (age_file[fi] > 1095) & ((model == HOUSE) | (model == FLAT) | (model == WAREHOUSE) | (model == FACTORY))
+        model[old] = RUIN
+        tint[old] = (150, 142, 128)
+        return model, tint
+
+    def _monuments(self):
+        """The largest file on each disk (worked out by the Atlas in the background)."""
+        now = time.monotonic()
+        if getattr(self, '_monument_time', -1e9) < now-60:
+            self._monument_time = now
+            self._monument_list = []
+            index = getattr(self.world, 'index', None)
+            try:
+                row = index.db().execute("SELECT value FROM meta WHERE key='monuments'").fetchone() if index else None
+                self._monument_list = json.loads(row[0]).get('places', []) if row else []
+            except Exception:
+                self._monument_list = []
+        return self._monument_list
+
+    def _volcanoes(self, T, k, b, sc, kinds_px, inv, entries, f, xs, ys, px, H, symbol):
+        """A folder most of whose files changed this week erupts: a volcano at its heart,
+        fading out as its own fields take over up close."""
+        flags = np.array([bool(e is not None and _volcanic(e)) for e in entries])
+        if not flags.any():
+            return
+        sel = (kinds_px >= 2) & flags[inv]
+        if not sel.any():
+            return
+        kk = k[sel]
+        cx = np.array([e['centroid'][0] if e is not None else 0.0 for e in entries])[inv[sel]]
+        cy = np.array([e['centroid'][1] if e is not None else 0.0 for e in entries])[inv[sel]]
+        side = sc[sel]
+        d = np.hypot(xs[kk]-cx, ys[kk]-cy)/(0.5*side)
+        cone = np.clip(1-d/0.6, 0, 1)
+        crater = smoothstep(0.14, 0.05, d)
+        w = smoothstep(0, 0.15*side, b[sel])*(1-smoothstep(60*px, 160*px, side))*f[sel]
+        H[kk] += side*0.1*(cone**1.3-0.35*crater)*w
+        strength = np.where(cone > 0, np.clip(cone*3, 0, 1)*w+crater*w, 0)
+        better = strength > symbol[kk, 0]
+        symbol[kk[better], 0] = strength[better]
+        symbol[kk[better], 1] = VOLCANO
 
     def _grouped_fbm(self, k, side, scale, octaves, base_seed, seed_class):
         """Smooth noise with wavelength proportional to each place's size, from shared tile fields."""
@@ -453,8 +640,14 @@ class Synth:
         for c in np.unique(symbol[k, 1]).astype(int):
             sel = symbol[k, 1] == c
             kk, ww = k[sel], w[sel]
-            kind = KIND_NAMES[c]
-            if kind == 'video':
+            kind = KIND_NAMES[c] if c < len(KIND_NAMES) else 'volcano'
+            if kind == 'volcano':
+                # Dark basalt flanks; the crater glows (w above 1 marks the crater).
+                crater = np.clip(symbol[kk, 0]-1.0, 0, 1)
+                col = np.array((58, 54, 52))*(1-crater[:, None])+np.array((230, 96, 40))*crater[:, None]
+                m = np.eye(8)[ROCK]
+                ww = np.clip(ww, 0, 1)
+            elif kind == 'video':
                 band = np.sin(H[kk]/(px*6)*math.pi)*0.5+0.5
                 col = np.array((160, 96, 66))*(1-band[:, None])+np.array((204, 162, 116))*band[:, None]
                 m = np.eye(8)[ROCK]*0.6+np.eye(8)[SAND]*0.4
@@ -478,7 +671,7 @@ class Synth:
 
     # ---------------------------------------------------------------- colour
 
-    def _colour(self, xs, ys, px, H, ridge, water, depth, leaf_kind, leaf_ref, leaves, now, coast, mat):
+    def _colour(self, xs, ys, px, H, ridge, water, depth, leaf_kind, leaf_ref, leaves, now, coast, mat, leaf_bd):
         """Colour for every pixel at once, from per-leaf lookup tables."""
         M = xs.size
         L = len(leaves)
@@ -492,7 +685,7 @@ class Synth:
             if entry is not None and T.path == '/':
                 zone = self.zone(entry['path'])
             else:
-                zone = T.zone if T.writable else 'alpine'
+                zone = climate(T.zone, T.writable)
             palette = CLIMATE.get(zone, CLIMATE['native'])
             if entry is not None:
                 kinds, newest, side = entry['kinds'], entry['newest'] or entry['mtime'], entry['side']
@@ -553,10 +746,28 @@ class Synth:
             sa = snow_amount[ref[li]]
             snow = np.clip((ridge[li]-0.2)*2.5+grain[li]*0.25, 0, 1)*sa   # snowbound: untouched > 2 years
             base = base*(1-snow[:, None])+SNOW[None, :]*snow[:, None]
-            rgb[li] = base
             m_land = m_land*(1-sand)+np.eye(8)[SAND][None, :]*sand
             m_land = m_land*(1-r)+np.eye(8)[ROCK][None, :]*r
             m_land = m_land*(1-snow[:, None])+np.eye(8)[SNOWM][None, :]*snow[:, None]
+            # An empty folder is a salt flat: a dry lakebed, white and cracked.
+            e = self._leaf_empty[ref[li]]
+            if e.any():
+                le = li[e]
+                cracks = np.abs(self.G.smooth(1/(px*18), 6060)[le]-0.5) < 0.035
+                base[e] = np.array((232, 226, 212))*(0.97+0.04*grain[le])[:, None]*np.where(cracks, 0.86, 1.0)[:, None]
+                m_land[e] = np.eye(8)[SAND]
+            # A folder the survey could not open is fenced off: posts along its border,
+            # the ground inside greyed and hatched.
+            fz = self._leaf_fenced[ref[li]]
+            if fz.any():
+                lf = li[fz]
+                hatch = (np.sin((xs[lf]-ys[lf])/(px*4))*0.5+0.5) > 0.8
+                post = (leaf_bd[lf] < 1.6*px) & (self.G.value(0.35/px, 6161)[lf] > 0.45)
+                g = base[fz].mean(axis=1, keepdims=True)
+                grey = base[fz]*0.35+g*0.65
+                grey = grey*np.where(hatch, 0.84, 1.0)[:, None]
+                base[fz] = np.where(post[:, None], np.array((70, 58, 46)), grey)
+            rgb[li] = base
             mat[li] = m_land
         sea = leaf_kind == 2
         if sea.any():
@@ -691,7 +902,16 @@ class Synth:
         valley = np.clip(1-(sd+wt/2)/(wt*2.5), 0, 1)
         # Rivers fade in as they widen, so small networks never etch the map like cracks.
         show = smoothstep(1.2, 3.5, wt/px)
-        if r['kind'] != 'delta':
+        if r.get('canyon') and r['kind'] == 'stream':
+            # A slot canyon: a chain of folders each holding one folder. Deep and narrow,
+            # with banded sandstone walls.
+            gorge = np.clip(1-(sd+wt/2)/(wt*4.0), 0, 1)
+            H[flat] -= np.minimum(wt*0.9, px*80)*gorge**1.5*show
+            wall = np.clip(gorge*1.6, 0, 1)*(1-np.clip(-sd/px+0.5, 0, 1))*show
+            band = np.sin(H[flat]/(px*3))*0.5+0.5
+            rock = np.array((178, 112, 72))*(1-band[:, None])+np.array((206, 150, 104))*band[:, None]
+            colour[flat, :3] = colour[flat, :3]*(1-wall[:, None])+rock*wall[:, None]
+        elif r['kind'] != 'delta':
             H[flat] -= np.minimum(wt*0.18, px*40)*valley**2*show
         wet = np.clip(-sd/px+0.5, 0, 1)*show
         colour[flat, :3] = colour[flat, :3]*(1-wet[:, None])+RIVER[None, :]*wet[:, None]
@@ -797,11 +1017,19 @@ class Synth:
             codes = np.array([KIND_CODE.get(k, KIND_CODE['other']) for k in pl.get('layout_kinds', pl['kinds'])], dtype=np.int64)
             seeds = np.array([stable_hash(p) for p in pl['paths']], dtype=np.uint64)
             landmark = ~np.asarray(pl.get('companion', np.zeros(pl['n'], dtype=bool)))
-            hit = (cKDTree(np.column_stack([pl['x'], pl['y']])), codes, (seeds % np.uint64(1 << 20)).astype(np.float64)/(1 << 20), landmark)
+            roles = np.array([ROLE_CODE.get(r, 0) for r in pl.get('roles', [''] * pl['n'])], dtype=np.int64)
+            styles = [LANG_STYLE.get(os.path.splitext(nm)[1].lower()) for nm in pl['names']]
+            h20 = (seeds % np.uint64(4)).astype(np.int64)
+            style_model = np.array([st[0] if st else HOUSE for st in styles], dtype=np.int64)
+            style_roof = np.array([st[1] if st else ROOFS[h20[i]] for i, st in enumerate(styles)], dtype=np.float64)
+            hit = (cKDTree(np.column_stack([pl['x'], pl['y']])), codes, (seeds % np.uint64(1 << 20)).astype(np.float64)/(1 << 20),
+                   landmark, roles, style_model, style_roof)
             self.site_cache[key] = hit
         return hit
 
     def _fields(self, xs, ys, px, visited, leaf_kind, leaf_ref, leaves, leaf_bd, fade_in, H, water, colour, mat, now):
+        x0f, y0f = xs[0], ys[0]
+        Sf = px*(N-1)
         """A folder's own files, drawn as fields: one cohesive patch per kind, one parcel per
         file. Far away a patch is a single forest or field system; closer, it divides into
         parcels (fields with hedgerows, city blocks with streets, peaks of a massif)."""
@@ -818,7 +1046,9 @@ class Synth:
             k = np.flatnonzero((leaf_kind == 1) & np.isin(leaf_ref, refs))
             if k.size == 0:
                 continue
-            tree, codes, hue, landmark = self._sites(T)
+            tree, codes, hue, landmark, roles, style_model, style_roof = self._sites(T)
+            age_file = (now-pl['mtime'])/DAY
+            self._file_landforms(T, pl, roles, x0f, y0f, Sf, px, now)
             R = pl['r']
             rmean = float(np.median(R))
             if rmean < px*0.25:
@@ -881,7 +1111,15 @@ class Synth:
                     # A forest: stands of different tone, crowns showing up close.
                     crown = self.G.value(_octave(7.0/rmean), 4242)[k][s_]
                     canopy = np.array((52, 76, 50))*vary[s_]*(0.72+0.45*crown*fine[s_]+0.28*(1-fine[s_]))[:, None]
-                    out[s_] = canopy
+                    # The season is the age: this year's photographs in leaf, last year's in
+                    # autumn colours (older ones lie under snow, below).
+                    fall = smoothstep(300, 600, age[s_])[:, None]*(1-smoothstep(700, 760, age[s_]))[:, None]
+                    turned = AUTUMN[(tt*3).astype(np.int64) % 3]*(0.8+0.3*crown[:, None])
+                    out[s_] = canopy*(1-fall)+turned*fall
+                    # Camera originals grow as old oaks, screenshots as shrubs.
+                    rc = roles[i1][s_]
+                    self._species[k[s_][rc == ROLE_CODE['oak']]] = OAK
+                    self._species[k[s_][rc == ROLE_CODE['shrub']]] = SHRUB
                     h[s_] = r1[s_]*0.05*(0.6+0.8*crown*fine[s_])
                     m[s_, FOREST] = 1
                 elif kind == 'video':
@@ -920,8 +1158,10 @@ class Synth:
                     h[s_] = r1[s_]*0.02*hedge
                     m[s_, FIELD] = 1-hedge
                     m[s_, FOREST] = hedge
-                elif kind in ('code', 'databases'):
-                    # A town: one block per file, streets between, roofs up close.
+                elif kind in ('code', 'databases', 'industry'):
+                    # A town: one block per file, streets between, roofs up close. Buildings
+                    # follow what the file does (see _lot_models); an industrial quarter holds
+                    # build output and model weights.
                     street = (1-smoothstep(0.05, 0.1, ee))*detail[s_]
                     ang = tt*math.pi/2
                     lx, ly = xs[k][s_]-sx[i1][s_], ys[k][s_]-sy[i1][s_]
@@ -931,15 +1171,23 @@ class Synth:
                     lot = lattice(np.floor(u).astype(np.int64), np.floor(v).astype(np.int64), 991+c)
                     # Houses fill each block, denser toward its heart, with gardens between.
                     size = 0.26+0.14*lot
-                    bld = ((np.abs(fu-0.5) < size) & (np.abs(fv-0.5) < size*0.8) & (d1[s_]/r1[s_] < 0.88) & (lot > 0.2+0.5*d1[s_]/r1[s_])).astype(np.float64)*fine[s_]
+                    rc = roles[i1][s_]
+                    single = (rc == ROLE_CODE['hall']) | (rc == ROLE_CODE['power'])
+                    bld = ((np.abs(fu-0.5) < size) & (np.abs(fv-0.5) < size*0.8) & (d1[s_]/r1[s_] < 0.88) & (lot > 0.2+0.5*d1[s_]/r1[s_]) & ~single).astype(np.float64)*fine[s_]
                     # Painted roofs only while a lot is small on screen; beyond that the 3D
                     # houses (symbol-sized) stand in for them.
                     painted = bld*(1-smoothstep(10.0, 16.0, r1[s_]*0.16/px))
-                    roofs = ROOFS_DB if kind == 'databases' else ROOFS
-                    roof = roofs[(lot*len(roofs)).astype(np.int64) % len(roofs)]
-                    town = np.array((134, 126, 116))*(0.94+0.12*n1[s_, None])
+                    roof = style_roof[i1][s_]
+                    ground = (112, 106, 98) if kind == 'industry' else (134, 126, 116)
+                    town = np.array(ground)*(0.94+0.12*n1[s_, None])
+                    # A square before the town hall.
+                    town = np.where(single[:, None] & (d1[s_]/r1[s_] < 0.6)[:, None], np.array((170, 160, 140)), town)
                     col = town*(1-painted[:, None])+roof*painted[:, None]
                     out[s_] = col*(1-street[:, None])+np.array((104, 102, 98))*street[:, None]
+                    if T.repo and kind == 'code':
+                        # A git repository is walled: stone along the town's edge.
+                        wall = ((pe[s_] < 0.05) | (leaf_bd[k][s_] < 1.4*px)) & (detail[s_] > 0.3)
+                        out[s_] = np.where(wall[:, None], np.array((150, 142, 128)), out[s_])
                     # No building heights in the terrain: the houses are 3D models (see
                     # _instances); raised lots became pillars on wide parcels.
                     m[s_, TOWN] = 1
@@ -956,7 +1204,10 @@ class Synth:
                         an = ang[on][first]
                         wx_ = sx[i1][s_][on][first]+(cu*np.cos(an)-cv*np.sin(an))*rr_
                         wy_ = sy[i1][s_][on][first]+(cu*np.sin(an)+cv*np.cos(an))*rr_
-                        self._lots.append(np.column_stack([wx_, wy_, 2*size[on][first]*rr_, an, roof[on][first]]))
+                        fi = i1[s_][on][first]
+                        model, tint = self._lot_models(fi, roles, style_model, style_roof, age_file)
+                        lot_size = np.clip(2*size[on][first]*rr_*1.4, 2.5*px, 1.6*SP*px)
+                        self._lots.append(np.column_stack([wx_, wy_, lot_size, an, tint, model]))
                 elif kind == 'archives':
                     # A glacier: one ice body, crevassed between files.
                     crev = (1-smoothstep(0.02, 0.06, ee))*detail[s_]
@@ -1019,6 +1270,11 @@ class Synth:
         line = np.clip(1-np.minimum(phase, 1-phase)*spacing/(px*0.9), 0, 1)*(water < 0.5)
         colour[:, :3] *= (1-0.1*line)[:, None]
         return colour
+
+
+def _volcanic(c) -> bool:
+    """Most of a sizeable folder changed this week."""
+    return (c.get('week') or 0) >= 200 and (c.get('week') or 0) >= 0.5*max(c.get('files') or 0, 1)
 
 
 def encode(tile: dict) -> bytes:

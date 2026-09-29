@@ -31,7 +31,7 @@ NO_CRAWL = {'/proc', '/sys', '/dev', '/run', '/mnt/wsl', '/mnt/wslg', '/lost+fou
             '/var/lib/docker', '/usr/lib/wsl', '/boot/efi'}
 REPARSE_POINT = 0x400
 KINDS = ('folders', 'pdf', 'images', 'audio', 'video', 'tables', 'code', 'archives', 'binaries',
-         'disks', 'databases', 'documents', 'other')
+         'disks', 'databases', 'documents', 'weights', 'other')
 DAY = 86400.0
 
 SCHEMA = """

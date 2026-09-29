@@ -6,6 +6,7 @@ polls /status, which folds survey progress into the map and lists regions to red
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import threading
@@ -18,7 +19,7 @@ import numpy as np
 
 from .index import Index, Surveyor
 from .tiles import N, Synth, encode
-from .world import HOME, SEA, World, label_at
+from .world import HOME, SEA, World, climate, label_at
 
 FULL_SURVEY_EVERY = 12*3600
 
@@ -35,12 +36,13 @@ def zone_for(path: str):
 
 PLURAL = {'pdf': 'PDFs', 'images': 'images', 'video': 'videos', 'audio': 'recordings', 'tables': 'tables',
           'code': 'source files', 'databases': 'databases', 'archives': 'archives', 'binaries': 'executables',
-          'disks': 'disk images', 'documents': 'documents', 'other': 'other files'}
+          'disks': 'disk images', 'documents': 'documents', 'other': 'other files', 'weights': 'model weights',
+          'industry': 'build outputs and models'}
 
 
 LIBRARY = {'video': 'video library', 'images': 'photo library', 'audio': 'music library', 'pdf': 'PDF library',
            'documents': 'documents', 'code': 'source code', 'archives': 'archives', 'tables': 'tables',
-           'databases': 'databases', 'disks': 'disk images', 'binaries': 'programs'}
+           'databases': 'databases', 'disks': 'disk images', 'binaries': 'programs', 'weights': 'AI models'}
 
 
 def subtitle_for(c: dict) -> str:
@@ -59,7 +61,7 @@ def patch_name(kind: str, n: int) -> str:
 
 def climate_for(path: str) -> str:
     zone, writable = zone_for(path)
-    return zone if writable else 'alpine'
+    return climate(zone, writable)
 
 
 # ---------------------------------------------------------------- tile workers
@@ -107,6 +109,7 @@ class Atlas:
             if last is None or time.time()-float(last[0]) > FULL_SURVEY_EVERY:
                 self.surveyor.request('/', 3)
                 self.full_survey = True
+            threading.Thread(target=self.find_monuments, daemon=True, name='monuments').start()
 
     # ---------------------------------------------------------------- tiles
 
@@ -212,6 +215,11 @@ class Atlas:
                 for i in vis[np.argsort(-r[vis])][:120]:
                     files.append({'name': pl['names'][i], 'path': pl['paths'][i], 'x': float(pl['x'][i]),
                                   'y': float(pl['y'][i]), 'r': float(r[i]), 'kind': pl['kinds'][i]})
+        for m in self.monuments():
+            if x0 < m['x'] < x1 and y0 < m['y'] < y1:
+                # Named at every zoom, like the peak of a continent.
+                files.append({'name': f"{m['name']} · largest file on {m['disk']}", 'path': m['path'], 'x': m['x'], 'y': m['y'],
+                              'r': px*40, 'kind': 'monument'})
         regions.sort(key=lambda r: -r['side'])
         files.sort(key=lambda f: -f['r'])
         patches.sort(key=lambda q: -q['side'])
@@ -234,7 +242,7 @@ class Atlas:
                     i = int(np.argmin(d))
                     if d[i] < max(pl['r'][i]*1.3, px*8):
                         found = {'name': pl['names'][i], 'path': pl['paths'][i], 'x': float(pl['x'][i]), 'y': float(pl['y'][i]),
-                                 'r': float(pl['r'][i]), 'kind': pl['kinds'][i]}
+                                 'r': float(pl['r'][i]), 'kind': pl['kinds'][i], 'role': (pl.get('roles') or [''] * pl['n'])[i]}
                 break
             entry = t.child_by_label.get(lab)
             if entry is None:
@@ -248,14 +256,50 @@ class Atlas:
             t = inner
         return {'chain': chain, 'file': found, 'sea': bool(chain == [] and found is None)}
 
-    def region(self, path: str) -> dict:
+    def find_monuments(self, force: bool = False):
+        """The largest file on each disk becomes its monument. A few seconds of scanning the
+        index, so it runs in the background and is kept for a day in the index's meta table,
+        where the tile workers read it."""
+        try:
+            db = self.index.db()
+            row = db.execute("SELECT value FROM meta WHERE key='monuments'").fetchone()
+            if row and not force and time.time()-json.loads(row[0]).get('time', 0) < 86400:
+                return
+            roots = sorted({World.continent_of(c['path']) for c in self.world.root().children})
+            places = []
+            for root in roots:
+                if root == '/':
+                    q = ("SELECT path, name, size FROM nodes WHERE is_dir=0 AND link=0 AND path NOT LIKE '/mnt/%' "
+                         "AND path NOT LIKE '/proc/%' ORDER BY size DESC LIMIT 1")
+                    hit = db.execute(q).fetchone()
+                else:
+                    hit = db.execute("SELECT path, name, size FROM nodes WHERE is_dir=0 AND link=0 AND path > ? AND path < ? "
+                                     "ORDER BY size DESC LIMIT 1", (root+'/', root+'0')).fetchone()
+                if not hit:
+                    continue
+                where = self.region(hit[0], survey=False)
+                if 'x' in where:
+                    places.append({'path': hit[0], 'name': hit[1], 'size': hit[2], 'x': where['x'], 'y': where['y'],
+                                   'disk': World.display_name(root, root) if root != '/' else 'Linux'})
+            with self.index.write_lock:
+                db.execute("INSERT OR REPLACE INTO meta VALUES('monuments', ?)", (json.dumps({'time': time.time(), 'places': places}),))
+                db.commit()
+        except Exception:
+            pass   # a monument is a nicety; the map never waits for it
+
+    def monuments(self) -> list:
+        row = self.index.db().execute("SELECT value FROM meta WHERE key='monuments'").fetchone()
+        return json.loads(row[0]).get('places', []) if row else []
+
+    def region(self, path: str, survey: bool = True) -> dict:
         """Where a path is on the map (laying out its ancestors as needed)."""
         path = os.path.abspath(path)
         # Looking at a place refreshes its own listing first; its insides follow in survey order
         # if they have never been surveyed.
         target = path if os.path.isdir(path) else os.path.dirname(path)
-        node = self.index.node(target)
-        self.surveyor.request(target, 0, recursive=node is None or not node['scanned'])
+        if survey:
+            node = self.index.node(target)
+            self.surveyor.request(target, 0, recursive=node is None or not node['scanned'])
         if path == '/':
             return {'path': '/', 'name': '/', 'x': 0.5, 'y': 0.5, 'side': 0.8, 'bbox': (0.1, 0.1, 0.9, 0.9)}
         parent = self.world.territory_for(os.path.dirname(path))
@@ -271,7 +315,7 @@ class Atlas:
             # Framed with its neighbours around it: a parcel is read in its patch.
             return {'path': path, 'name': pl['names'][i], 'x': float(pl['x'][i]), 'y': float(pl['y'][i]), 'side': r*6,
                     'bbox': (float(pl['x'][i])-r*3, float(pl['y'][i])-r*3, float(pl['x'][i])+r*3, float(pl['y'][i])+r*3),
-                    'file': True, 'kind': pl['kinds'][i], 'r': r}
+                    'file': True, 'kind': pl['kinds'][i], 'r': r, 'role': (pl.get('roles') or [''] * pl['n'])[i]}
         return {'error': 'Not on the map yet. The survey has been asked to go there first.'}
 
     @staticmethod
