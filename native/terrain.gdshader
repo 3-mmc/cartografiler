@@ -23,6 +23,12 @@ uniform float exaggeration = 4.0;
 uniform float weather_on = 1.0;
 uniform float time_s = 0.0;
 uniform float sink = 0.0;            // coarse fallback tiles sit just under finer ones
+// Which of this tile's sub-cells a finer tile has already drawn. A coarse stand-in and the
+// finer tile over it disagree about the ground by far more than any clearance can hide (a
+// quarter of the view, where the finer tile has descended into a child territory), so the
+// stand-in gives up those cells entirely instead of fighting for them.
+uniform int covered = 0;             // bitmask, row-major over covered_n x covered_n
+uniform int covered_n = 1;
 
 varying vec2 tuv;
 varying vec2 puv;
@@ -81,6 +87,13 @@ void vertex() {
 }
 
 void fragment() {
+	if (covered != 0) {
+		int cx = int(floor(clamp(puv.x, 0.0, 0.999) * float(covered_n)));
+		int cy = int(floor(clamp(puv.y, 0.0, 0.999) * float(covered_n)));
+		if ((covered & (1 << (cy * covered_n + cx))) != 0) {
+			discard;
+		}
+	}
 	float e = 1.0 / SAMPLES;
 	float hl = textureLod(heightmap, tuv - vec2(e, 0.0), 0.0).r;
 	float hr = textureLod(heightmap, tuv + vec2(e, 0.0), 0.0).r;

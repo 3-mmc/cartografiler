@@ -7,7 +7,7 @@ extends RefCounted
 static func build() -> Array[ArrayMesh]:
 	return [broadleaf(), conifer(), house(), boulder(), palm(), cactus(), shrub(), oak(), flat_house(), factory(),
 		warehouse(), silo(), power_station(), ruin(), town_hall(), keep(), steam(), obelisk(), arch(), block(), tower(),
-		wall_tower()]
+		wall_tower(), aqueduct()]
 
 static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, part: float, centre: Vector3 = Vector3(INF, 0, 0)):
 	# Faces point away from the model's centre (or its axis), wound clockwise as seen from
@@ -327,6 +327,52 @@ static func obelisk() -> ArrayMesh:
 	_box(st, Vector3(-0.3, 0, -0.3), Vector3(0.3, 0.08, 0.3), 0.0)
 	_prism(st, 0.12, 0.08, 1.0, 4, 1.0, 0.08)
 	_prism(st, 0.08, 1.0, 1.15, 4, 1.0, 0.0)
+	return _finish(st)
+
+static func aqueduct() -> ArrayMesh:
+	# One span of a Roman arcade, built to abut its neighbours: the deck runs the full unit
+	# width so a row of them joins into a continuous channel, and the piers stand at the unit
+	# edges so two units share a pier. Masonry, unlike the natural arch above it in this file.
+	var st = _begin()
+	var half = 0.5
+	var pier = 0.12
+	var spring = 0.42          # where the arch springs from the piers
+	var deck = 0.86
+	var depth = 0.16
+	# Piers, at both edges so neighbouring spans share them.
+	_box(st, Vector3(-half, 0.0, -depth), Vector3(-half+pier, spring, depth), 1.0, false)
+	_box(st, Vector3(half-pier, 0.0, -depth), Vector3(half, spring, depth), 1.0, false)
+	# The arch ring over the opening, as a band of voussoirs.
+	var segs = 10
+	var r = half-pier
+	var prev_in = Vector3.ZERO
+	var prev_out = Vector3.ZERO
+	for i in segs+1:
+		var a2 = PI*float(i)/segs
+		var cx = -cos(a2)*r
+		var cy = spring+sin(a2)*r*0.62
+		var nx = -cos(a2)
+		var ny = sin(a2)*0.62
+		var l = sqrt(nx*nx+ny*ny)
+		nx /= l
+		ny /= l
+		var inner = Vector3(cx, cy, 0)
+		var outer = Vector3(cx+nx*0.10, cy+ny*0.10, 0)
+		if i > 0:
+			for s in [-depth, depth]:
+				var a3 = prev_in+Vector3(0, 0, s)
+				var b3 = prev_out+Vector3(0, 0, s)
+				var c3 = outer+Vector3(0, 0, s)
+				var d3 = inner+Vector3(0, 0, s)
+				_tri(st, a3, b3, c3, 1.0, Vector3(0, spring, 0))
+				_tri(st, a3, c3, d3, 1.0, Vector3(0, spring, 0))
+			# The soffit: the underside of the opening.
+			_tri(st, prev_in+Vector3(0, 0, -depth), inner+Vector3(0, 0, -depth), inner+Vector3(0, 0, depth), 1.0, Vector3(0, 9, 0))
+			_tri(st, prev_in+Vector3(0, 0, -depth), inner+Vector3(0, 0, depth), prev_in+Vector3(0, 0, depth), 1.0, Vector3(0, 9, 0))
+		prev_in = inner
+		prev_out = outer
+	# The deck, spanning the whole unit so a run of them is unbroken.
+	_box(st, Vector3(-half, deck, -depth), Vector3(half, deck+0.14, depth), 1.0)
 	return _finish(st)
 
 static func arch() -> ArrayMesh:

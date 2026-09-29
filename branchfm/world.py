@@ -32,10 +32,29 @@ import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
+from . import fastnoise as _fastnoise
+
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
 LAYOUT_VERSION = 16          # bump when the layout changes shape, so cached territories are redone
+
+
+def system_name() -> str:
+    """The root disk's continent name. Under WSL the Linux root shares the world with the
+    Windows drives, and saying which one this is earns the name; installed directly it is
+    simply the distribution."""
+    if os.path.exists('/usr/lib/wsl') or 'microsoft' in os.uname().release.lower():
+        return 'Linux · WSL'
+    try:
+        with open('/etc/os-release', encoding='utf-8') as f:
+            names = dict(line.rstrip('\n').split('=', 1) for line in f if '=' in line)
+        return names.get('PRETTY_NAME', names.get('NAME', '')).strip('"') or 'Linux'
+    except OSError:
+        return 'Linux'
+
+
+SYSTEM_NAME = system_name()
 
 # ---------------------------------------------------------------- hashing & noise
 
@@ -78,7 +97,19 @@ def value_noise(x, y, freq: float, seed):
     b = lattice(xi+1, yi, seed)
     c = lattice(xi, yi+1, seed)
     d = lattice(xi+1, yi+1, seed)
-    return (a + (b-a)*fx) + ((c + (d-c)*fx) - (a + (b-a)*fx))*fy
+    # The lower edge is held: spelled out twice it is a second full-grid interpolation.
+    top = a + (b-a)*fx
+    return top + ((c + (d-c)*fx) - top)*fy
+
+
+# The same maths, compiled, when numba is installed. The NumPy definitions above stay the
+# reference: `tests/test_world.py` checks the two agree bit for bit, because territories, the
+# tile cache and the borders are all keyed on the exact values.
+value_noise_numpy = value_noise
+lattice_numpy = lattice
+if _fastnoise.HAVE_NUMBA:
+    value_noise = _fastnoise.value_noise
+    lattice = _fastnoise.lattice
 
 
 def fbm(x, y, freq: float, octaves: int, seed, gain: float = 0.5):
@@ -159,9 +190,12 @@ class GridNoise:
         wy = _bspline(ty)
         cx = ix-i0
         cy = iy-j0
-        A = sum(L[:, cx+(o-1)]*wx[o][None, :] for o in range(4))          # (lattice rows, n)
-        out = sum(A[cy+(o-1), :]*wy[o][:, None] for o in range(4))          # (n, n)
-        out = (0.5+(out.ravel()-0.5)*1.33)
+        if _fastnoise.HAVE_NUMBA:
+            out = _fastnoise.smooth_separable(L, cx, cy, np.asarray(wx), np.asarray(wy))
+        else:
+            A = sum(L[:, cx+(o-1)]*wx[o][None, :] for o in range(4))      # (lattice rows, n)
+            out = sum(A[cy+(o-1), :]*wy[o][:, None] for o in range(4)).ravel()   # (n, n)
+        out = (0.5+(out-0.5)*1.33)
         self.memo[key] = out
         return out
 
@@ -1058,7 +1092,7 @@ class World:
             linux = member_group[owner] == 0
             if linux.any():
                 lc = cells[linux]
-                t.node['continent'] = {'name': 'Linux · WSL', 'centroid': ((lc[:, 0].mean())*cell+x0, (lc[:, 1].mean())*cell+y0),
+                t.node['continent'] = {'name': SYSTEM_NAME, 'centroid': ((lc[:, 0].mean())*cell+x0, (lc[:, 1].mean())*cell+y0),
                                        'side': math.sqrt(linux.sum())*cell}
         if continental:
             t.mouth = mouth

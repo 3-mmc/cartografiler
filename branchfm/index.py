@@ -38,7 +38,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes(
   id INTEGER PRIMARY KEY, parent INTEGER, name TEXT NOT NULL, path TEXT UNIQUE NOT NULL,
   depth INTEGER NOT NULL, is_dir INTEGER NOT NULL, kind TEXT NOT NULL,
-  size INTEGER DEFAULT 0, mtime REAL DEFAULT 0, link INTEGER DEFAULT 0, attrs INTEGER DEFAULT 0,
+  size INTEGER DEFAULT 0, mtime REAL DEFAULT 0, link INTEGER DEFAULT 0, target TEXT, attrs INTEGER DEFAULT 0,
   scanned REAL DEFAULT 0, error TEXT,
   files INTEGER DEFAULT 0, dirs INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0, newest REAL DEFAULT 0,
   day INTEGER DEFAULT 0, week INTEGER DEFAULT 0, kinds TEXT, unscanned INTEGER DEFAULT 0,
@@ -51,6 +51,16 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 
 def default_location() -> Path:
     return Path(os.environ.get('XDG_DATA_HOME', Path.home()/'.local/share'))/'branch/index.sqlite'
+
+
+def link_target(path: str) -> str | None:
+    """Where a symlink points, made absolute. Never followed: the target may not exist, may
+    be a loop, or may sit on a filesystem the survey is not allowed to touch."""
+    try:
+        raw = os.readlink(path)
+    except OSError:
+        return None
+    return raw if raw.startswith('/') else os.path.normpath(os.path.join(os.path.dirname(path), raw))
 
 
 def depth_of(path: str) -> int:
@@ -89,6 +99,10 @@ class Index:
                 # added later, so every folder settles again, deepest first, in the background.
                 db.execute('ALTER TABLE nodes ADD COLUMN kind_bytes TEXT')
                 db.execute('UPDATE nodes SET dirty=1 WHERE is_dir=1 AND scanned>0')
+            if 'target' not in columns:
+                # Where a link points: an aqueduct has to have somewhere to carry water from.
+                # Only links carry one, so nothing else need be re-crawled.
+                db.execute('ALTER TABLE nodes ADD COLUMN target TEXT')
             if db.execute("SELECT 1 FROM nodes WHERE path='/'").fetchone() is None:
                 db.execute("INSERT INTO nodes(parent,name,path,depth,is_dir,kind) VALUES(NULL,'/','/',0,1,'folders')")
             db.commit()
@@ -167,15 +181,17 @@ class Index:
                 if old.get(name) not in (None, int(bool(is_dir))):
                     self._delete_subtree(child)
                 rows.append((dir_id, name, child, depth, int(bool(is_dir)), kind_of(name, bool(is_dir)),
-                             int(size or 0), float(mtime or 0), int(bool(link)), int(attrs or 0), int(bool(is_dir))))
+                             int(size or 0), float(mtime or 0), int(bool(link)), link_target(child) if link else None,
+                             int(attrs or 0), int(bool(is_dir))))
                 if crawlable and child not in NO_CRAWL:
                     subdirs.append(child)
             for name in set(old) - seen:
                 self._delete_subtree(base+'/'+name)
-            db.executemany("""INSERT INTO nodes(parent,name,path,depth,is_dir,kind,size,mtime,link,attrs,dirty)
-                              VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            db.executemany("""INSERT INTO nodes(parent,name,path,depth,is_dir,kind,size,mtime,link,target,attrs,dirty)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                               ON CONFLICT(path) DO UPDATE SET is_dir=excluded.is_dir, kind=excluded.kind,
-                              size=excluded.size, mtime=excluded.mtime, link=excluded.link, attrs=excluded.attrs""", rows)
+                              size=excluded.size, mtime=excluded.mtime, link=excluded.link,
+                              target=excluded.target, attrs=excluded.attrs""", rows)
             db.execute('UPDATE nodes SET scanned=?, error=NULL, dirty=1 WHERE id=?', (when, dir_id))
             self._mark_ancestors(path)
             db.commit()

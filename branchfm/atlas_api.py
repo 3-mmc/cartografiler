@@ -19,9 +19,120 @@ import numpy as np
 
 from .index import Index, Surveyor
 from .tiles import N, Synth, encode
-from .world import HOME, SEA, World, climate, label_at
+from .world import HOME, LAYOUT_VERSION, SEA, World, climate, label_at
 
 FULL_SURVEY_EVERY = 12*3600
+TILE_CACHE_MAX_AGE = 24*3600    # colour fades with a folder's age in days; a day's drift is invisible
+
+
+def _codec():
+    """zstd where it is installed, deflate otherwise. On real tiles zstd-3 stores a third
+    against deflate's 45% and is quicker both ways, and every cache hit pays the read."""
+    try:
+        import zstandard
+    except ImportError:
+        import zlib
+        return b'D', lambda d: zlib.compress(d, 1), zlib.decompress
+    c = zstandard.ZstdCompressor(level=3)
+    d = zstandard.ZstdDecompressor()
+    return b'Z', c.compress, d.decompress
+
+
+TILE_CODEC, _compress, _decompress = _codec()
+_DECOMPRESS = {}
+
+
+def _expand(blob: bytes):
+    """A tile written by whichever codec was installed then. A row this build cannot read is
+    simply a miss, so a machine that loses zstd redraws rather than misreads."""
+    tag, body = blob[:1], blob[1:]
+    if tag == TILE_CODEC:
+        return _decompress(body)
+    if tag == b'D':
+        import zlib
+        return zlib.decompress(body)
+    if tag == b'Z':
+        import zstandard
+        return zstandard.ZstdDecompressor().decompress(body)
+    raise ValueError('unknown tile codec')
+TILE_CACHE_TRANSIENT = 900      # a geyser's own window: a tile holding one may not outlive it
+
+
+class TileStore:
+    """Rendered tiles on disk, kept across sessions beside the laid-out territories.
+
+    A tile costs 0.1–1.6 s to render and compresses to about a third, so a revisited place
+    is worth reading back rather than drawing again. Validity is not a signature: a
+    territory's signature is its shape (`World._signature`), and the raster also bakes in
+    activity, which the shape never notices. Instead every tile is stored with the moment it
+    stops being true, and dropped by the same bounding boxes that already invalidate the
+    tiles held in memory. A tile showing a geyser expires with the geyser's 15-minute window;
+    coarse tiles nearly always show one, since a child's recency is its whole subtree's."""
+    def __init__(self, location):
+        import sqlite3
+        self.location = location
+        self.local = threading.local()
+        with self.db() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS tiles(level INTEGER, x INTEGER, y INTEGER, expires REAL, blob BLOB, PRIMARY KEY(level, x, y))')
+            if 'expires' not in {r[1] for r in db.execute('PRAGMA table_info(tiles)')}:
+                db.execute('DROP TABLE tiles')   # an older store keyed by when it was written
+                db.execute('CREATE TABLE tiles(level INTEGER, x INTEGER, y INTEGER, expires REAL, blob BLOB, PRIMARY KEY(level, x, y))')
+            db.execute('CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)')
+            row = db.execute("SELECT value FROM meta WHERE key='layout_version'").fetchone()
+            if row is None or int(row[0]) != LAYOUT_VERSION:
+                # The world is laid out differently now; every stored raster is of another map.
+                db.execute('DELETE FROM tiles')
+                db.execute("INSERT OR REPLACE INTO meta VALUES('layout_version', ?)", (str(LAYOUT_VERSION),))
+
+    def db(self):
+        import sqlite3
+        db = getattr(self.local, 'db', None)
+        if db is None:
+            db = sqlite3.connect(self.location, timeout=30, check_same_thread=False)
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('PRAGMA synchronous=NORMAL')
+            self.local.db = db
+        return db
+
+    def close(self):
+        db = getattr(self.local, 'db', None)
+        if db is not None:
+            db.close()
+            self.local.db = None
+
+    def get(self, level, x, y):
+        try:
+            row = self.db().execute('SELECT expires, blob FROM tiles WHERE level=? AND x=? AND y=?', (level, x, y)).fetchone()
+            if row is None or row[0] <= time.time():
+                return None
+            return _expand(row[1])
+        except Exception:
+            return None   # a cache: an unreadable row only costs a redraw
+
+    def put(self, level, x, y, data, ttl=TILE_CACHE_MAX_AGE):
+        try:
+            db = self.db()
+            db.execute('INSERT OR REPLACE INTO tiles VALUES(?,?,?,?,?)',
+                       (level, x, y, time.time()+ttl, TILE_CODEC+_compress(data)))
+            db.commit()
+        except Exception:
+            pass   # a cache: losing a write only costs a redraw
+
+    def drop(self, boxes):
+        """Forget every stored tile a changed region touches."""
+        try:
+            db = self.db()
+            for level, x, y in [r for r in db.execute('SELECT level, x, y FROM tiles')
+                                if any(_hit(_tile_box(*r), b) for b in boxes)]:
+                db.execute('DELETE FROM tiles WHERE level=? AND x=? AND y=?', (level, x, y))
+            db.commit()
+        except Exception:
+            pass
+
+
+def _tile_box(level, x, y):
+    S = 0.5**level
+    return (x*S, y*S, (x+1)*S, (y+1)*S)
 
 
 @lru_cache(maxsize=65536)
@@ -70,17 +181,25 @@ _worker = {}
 
 
 def _worker_init(index_path: str):
+    # Drawing a tile is worth a second; dropping the window to 15 fps for it is not. The
+    # workers fill every core while the map is still coming in, which is exactly when the
+    # renderer needs one, so they yield to it.
+    try:
+        os.nice(10)
+    except (OSError, AttributeError):
+        pass
     _worker['index'] = Index(index_path)
     _worker['serial'] = None
 
 
-def _worker_tile(level: int, x: int, y: int, serial: int) -> bytes:
+def _worker_tile(level: int, x: int, y: int, serial: int) -> tuple[bytes, bool]:
     # Each worker keeps its own lazily laid-out world, and starts afresh when the map changed.
     if _worker.get('serial') != serial:
         _worker['world'] = World(_worker['index'], zone_for=zone_for)
         _worker['synth'] = Synth(_worker['world'], zone_for=climate_for)
         _worker['serial'] = serial
-    return encode(_worker['synth'].tile(level, x, y))
+    tile = _worker['synth'].tile(level, x, y)
+    return encode(tile), bool(tile.get('transient'))
 
 
 class Atlas:
@@ -95,6 +214,8 @@ class Atlas:
         self.pool = concurrent.futures.ProcessPoolExecutor(count, mp_context=multiprocessing.get_context('spawn'),
                                                            initializer=_worker_init, initargs=(str(self.index.location),)) if count else None
         self.full_survey = False
+        loc = str(self.index.location) if getattr(self.index, 'location', None) is not None else ''
+        self.store = TileStore(loc.replace('index.sqlite', 'tiles.sqlite') if loc.endswith('index.sqlite') else loc+'.tiles') if loc else None
         self.tiles: OrderedDict[tuple, tuple] = OrderedDict()
         self.tile_lock = threading.Lock()
         self.slots = threading.Semaphore(max(2, (os.cpu_count() or 4)//2))
@@ -120,11 +241,17 @@ class Atlas:
             if hit is not None:
                 self.tiles.move_to_end(key)
                 return hit[0]
-        if self.pool is not None:
-            data = self.pool.submit(_worker_tile, level, x, y, self.world.serial).result()
+        stored = self.store.get(level, x, y) if self.store else None
+        if stored is not None:
+            data, transient = stored, True      # already on disk; no need to write it back
+        elif self.pool is not None:
+            data, transient = self.pool.submit(_worker_tile, level, x, y, self.world.serial).result()
         else:
             with self.slots:
-                data = encode(self.synth.tile(level, x, y))
+                tile = self.synth.tile(level, x, y)
+                data, transient = encode(tile), bool(tile.get('transient'))
+        if stored is None and self.store:
+            self.store.put(level, x, y, data, TILE_CACHE_TRANSIENT if transient else TILE_CACHE_MAX_AGE)
         S = 0.5**level
         with self.tile_lock:
             self.tiles[key] = (data, (x*S, y*S, (x+1)*S, (y+1)*S))
@@ -144,6 +271,8 @@ class Atlas:
                     with self.tile_lock:
                         for key in [k for k, (_, bb) in self.tiles.items() if any(_hit(bb, b) for b in fresh)]:
                             del self.tiles[key]
+                    if self.store:
+                        self.store.drop(fresh)
                     self.dropped_serial = self.world.serial
         if self.full_survey and not self.surveyor.pending() and not self.surveyor.current:
             self.full_survey = False
@@ -333,6 +462,8 @@ class Atlas:
         self.surveyor.stop()
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
+        if self.store:
+            self.store.close()
 
 
 def _hit(a, b) -> bool:

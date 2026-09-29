@@ -1,11 +1,14 @@
 """The survey index, world layout and terrain synthesis, on small generated trees."""
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+from branchfm.atlas_api import TILE_CACHE_MAX_AGE, TILE_CACHE_TRANSIENT, TileStore
+from branchfm import fastnoise, world
 from branchfm.index import Index, list_linux
 from branchfm.tiles import N, Synth, encode
 from branchfm.world import FIRST_CHILD, HOME, World, label_at
@@ -301,6 +304,99 @@ class WorldTests(unittest.TestCase):
         finally:
             atlas.close()
             atlas.world.store.close()
+
+
+class TileStoreTests(unittest.TestCase):
+    """Rendered tiles kept across sessions: a revisited place is read back, a changed one is not."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = TileStore(os.path.join(self.tmp.name, 'tiles.sqlite'))
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_a_stored_tile_comes_back_whole(self):
+        blob = os.urandom(4096)
+        self.store.put(3, 4, 4, blob)
+        self.assertEqual(self.store.get(3, 4, 4), blob)
+        self.assertIsNone(self.store.get(3, 4, 5))
+
+    def test_a_tile_past_its_expiry_is_not_served(self):
+        self.store.put(3, 4, 4, b'stale')
+        self.store.db().execute('UPDATE tiles SET expires=?', (time.time()-1,))
+        self.store.db().commit()
+        self.assertIsNone(self.store.get(3, 4, 4))
+
+    def test_a_tile_with_a_geyser_outlives_only_the_geyser(self):
+        self.store.put(3, 4, 4, b'erupting', ttl=TILE_CACHE_TRANSIENT)
+        self.store.put(3, 0, 0, b'quiet')
+        spans = {r[0]: r[1]-time.time() for r in self.store.db().execute('SELECT x, expires FROM tiles')}
+        self.assertLessEqual(spans[4], TILE_CACHE_TRANSIENT)
+        self.assertGreater(spans[0], TILE_CACHE_TRANSIENT)
+
+    def test_a_changed_region_drops_only_the_tiles_it_touches(self):
+        self.store.put(3, 4, 4, b'here')      # spans 0.500..0.625
+        self.store.put(3, 0, 0, b'far')       # spans 0.000..0.125
+        self.store.drop([(0.51, 0.51, 0.52, 0.52)])
+        self.assertIsNone(self.store.get(3, 4, 4))
+        self.assertEqual(self.store.get(3, 0, 0), b'far')
+
+    def test_a_new_layout_version_empties_the_store(self):
+        self.store.put(3, 4, 4, b'old world')
+        self.store.db().execute("INSERT OR REPLACE INTO meta VALUES('layout_version', '-1')")
+        self.store.db().commit()
+        self.store.close()
+        again = TileStore(os.path.join(self.tmp.name, 'tiles.sqlite'))
+        self.addCleanup(again.close)
+        self.assertIsNone(again.get(3, 4, 4))
+
+
+@unittest.skipUnless(fastnoise.HAVE_NUMBA, 'numba is not installed; the NumPy path is in use')
+class CompiledNoiseTests(unittest.TestCase):
+    """The compiled kernels must agree with the NumPy definitions to the last bit: laid-out
+    territories, cached tiles and the borders are all keyed on the exact values."""
+    def test_value_noise_matches_across_ranges_and_seeds(self):
+        rng = np.random.default_rng(11)
+        for freq in (0.5, 8.0, 1024.0, 65536.0):
+            for seed in (0, 1013, -623324649033, 2**40):
+                x = rng.uniform(-50, 50, 257)
+                y = rng.uniform(-50, 50, 257)
+                self.assertTrue(np.array_equal(world.value_noise_numpy(x, y, freq, seed),
+                                               fastnoise.value_noise(x, y, freq, seed)),
+                                f'value_noise differs at freq={freq} seed={seed}')
+
+    def test_lattice_matches_including_negative_coordinates(self):
+        rng = np.random.default_rng(12)
+        for lo, hi in ((-5, 5), (-10**6, 10**6), (0, 3)):
+            i = rng.integers(lo, hi, 400).astype(np.int64)
+            j = rng.integers(lo, hi, 400).astype(np.int64)
+            self.assertTrue(np.array_equal(world.lattice_numpy(i, j, 4242), fastnoise.lattice(i, j, 4242)))
+
+    def test_a_tile_is_byte_for_byte_what_numpy_draws(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'a').mkdir()
+            for i in range(30):
+                (root/'a'/f'f{i}.py').write_text('x = %d\n' % i)
+            index = Index(os.path.join(tmp, 'ix.sqlite'))
+            survey(index, root)
+            self.addCleanup(index.close) if hasattr(index, 'close') else None
+            def draw():
+                w = World(index)
+                try:
+                    return encode(Synth(w).tile(0, 0, 0))
+                finally:
+                    if w.store: w.store.close()
+            compiled = draw()
+            fastnoise.HAVE_NUMBA = False
+            world.value_noise, world.lattice = world.value_noise_numpy, world.lattice_numpy
+            try:
+                plain = draw()
+            finally:
+                fastnoise.HAVE_NUMBA = True
+                world.value_noise, world.lattice = fastnoise.value_noise, fastnoise.lattice
+            self.assertEqual(compiled, plain)
 
 
 if __name__ == '__main__':

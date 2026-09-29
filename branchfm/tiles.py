@@ -79,11 +79,14 @@ SYMBOL_KINDS = ('video', 'pdf', 'images', 'archives', 'audio', 'code')
 # 3D instances the client draws (native/models.gd builds the meshes, in this order).
 MODEL_NAMES = ('broadleaf', 'conifer', 'house', 'boulder', 'palm', 'cactus', 'shrub', 'oak', 'flat_house', 'factory',
                'warehouse', 'silo', 'power_station', 'ruin', 'town_hall', 'keep', 'steam', 'obelisk', 'arch', 'block', 'tower',
-               'wall_tower')
+               'wall_tower', 'aqueduct')
 (BROADLEAF, CONIFER, HOUSE, BOULDER, PALM, CACTUS, SHRUB, OAK, FLAT, FACTORY, WAREHOUSE, SILO, POWER, RUIN, HALL,
- KEEP, STEAM, OBELISK, ARCH, BLOCK, TOWER, WALL_TOWER) = range(len(MODEL_NAMES))
+ KEEP, STEAM, OBELISK, ARCH, BLOCK, TOWER, WALL_TOWER, AQUEDUCT) = range(len(MODEL_NAMES))
 CITY_MIN = 25                   # a town of at least this many files grows a city centre
 # Rows of self._lots: x, y, size, yaw, r, g, b, model, height factor.
+ACROSS_BANK = 0.55              # a riverside town spreads along the water, not into it
+BRIDGE_MIN = 18                 # buildings a town astride a river needs before it bridges it
+MAX_SPANS = 24                  # an arcade stays a structure, not a wall across the map
 LOT_COLUMNS = 9
 SP = 3                          # instance grid spacing, in tile samples
 ROLE_CODE = {'': 0, 'house': 1, 'depot': 2, 'factory': 3, 'silo': 4, 'power': 5, 'hall': 6, 'arch': 7, 'oak': 8, 'shrub': 9}
@@ -356,6 +359,9 @@ class Synth:
 
         lap('detail')
         mat = np.zeros((M, len(MATERIALS)))
+        # Geysers and their steam are drawn from a 15-minute window, so a tile that has any
+        # must not outlive the session on disk: the shape signatures do not notice activity.
+        self.transient = False
         self._planned = np.zeros(M, dtype=bool)   # pixels whose houses come from their lots
         self._lots = []                           # rows: LOT_COLUMNS
         self._cities = []                         # (x, y, radius) of city centres drawn here
@@ -382,7 +388,7 @@ class Synth:
         instances = self._instances(tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind, leaf_ref)
         lap('instances')
         mat = np.clip(mat*255, 0, 255).astype(np.uint8)
-        return {'level': level, 'x': tx, 'y': ty, 'base': base, 'instances': instances,
+        return {'level': level, 'x': tx, 'y': ty, 'base': base, 'instances': instances, 'transient': self.transient,
                 'height': (H-base).astype(np.float32).reshape(N, N),
                 'colour': np.clip(colour, 0, 255).astype(np.uint8).reshape(N, N, 4),
                 'aux': np.stack([np.clip(rain*255, 0, 255), np.clip(fog*255, 0, 255), np.clip(depth*255, 0, 255), np.clip(ridge*255, 0, 255)], axis=1).astype(np.uint8).reshape(N, N, 4),
@@ -538,6 +544,7 @@ class Synth:
                 if not (x0 <= x < x0+S and y0 <= y < y0+S):
                     continue
                 if now-(c['newest'] or 0) < 900:
+                    self.transient = True
                     self._lots.append(np.array([[x, y, 1.3*SP*px, 0.0, 236, 240, 238, STEAM, 1.0]]))
                 if _volcanic(c):
                     self._lots.append(np.array([[x, y, 1.8*SP*px, 0.0, 84, 80, 78, STEAM, 1.0]]))
@@ -546,9 +553,51 @@ class Synth:
                 code = content_shares(c['kinds'], c.get('kind_bytes')).get('code', 0)+content_shares(c['kinds'], c.get('kind_bytes')).get('databases', 0)
                 if code >= 0.4 and (c['files'] or 0) >= CITY_MIN and c['side'] >= 6*SP*px:
                     vendored = any(v in c['path']+'/' for v in VENDORED)
-                    rows = self._city(x, y, c['side'], c['files'], 'depot' if vendored else 'code', c['path'], px)
+                    rows = self._city(x, y, c['side'], c['files'], 'depot' if vendored else 'code', c['path'], px,
+                                      self._river_axis(T, x, y))
                     if rows:
                         self._lots.append(np.array(rows, dtype=np.float64))
+
+    def _aqueduct(self, x, y, rf, px, T=None, pl=None):
+        """A folder's links are one aqueduct: an unbroken arcade, not a scatter of ruins.
+
+        It is built where a Roman one would be, and so has a source and a destination rather
+        than two arbitrary ends: it starts at the water (the folder's river, or its outlet)
+        and runs to the settlement it serves (the town of source files). With neither, it
+        falls back to the line the links themselves lie along. Spans abut, one pier shared
+        between neighbours, so the deck reads as one channel."""
+        tint = (196, 180, 150)
+        size = float(np.clip(float(np.median(rf))*1.4, 3*px, 7*px))
+        cx, cy = float(x.mean()), float(y.mean())
+        src = dst = None
+        if T is not None:
+            axis = self._river_axis(T, cx, cy)
+            if axis is not None:
+                _, toward, dist = axis
+                src = (cx+toward[0]*dist, cy+toward[1]*dist)      # the bank it draws from
+        if pl is not None:
+            towns = [q for q in pl.get('patches', []) if q['kind'] in ('code', 'databases')]
+            if towns:
+                q = min(towns, key=lambda q: (q['x']-cx)**2+(q['y']-cy)**2)
+                dst = (q['x'], q['y'])                            # the place it supplies
+        if src is None or dst is None or math.dist(src, dst) < 2*size:
+            # No water or no town to serve: lay it along the links' own scatter instead.
+            if x.size <= 2:
+                return [[float(x[i]), float(y[i]), size, 0.0, *tint, AQUEDUCT, 1.0] for i in range(x.size)]
+            u, v = x-cx, y-cy
+            ang = 0.5*math.atan2(2*float((u*v).sum()), float((u*u).sum()-(v*v).sum()))
+            d = u*math.cos(ang)+v*math.sin(ang)
+            src = (cx+math.cos(ang)*float(d.min()), cy+math.sin(ang)*float(d.min()))
+            dst = (cx+math.cos(ang)*float(d.max()), cy+math.sin(ang)*float(d.max()))
+        run = math.dist(src, dst)
+        ang = math.atan2(dst[1]-src[1], dst[0]-src[0])
+        # One span per span-width, so the piers meet and the decks join. A long run widens its
+        # spans rather than stopping short: an aqueduct that does not arrive is a ruin.
+        n = int(np.clip(round(run/size), 1, MAX_SPANS))
+        size = float(np.clip(run/n, 3*px, 12*px))
+        ux, uy = math.cos(ang), math.sin(ang)
+        return [[src[0]+ux*size*(k+0.5), src[1]+uy*size*(k+0.5), size, ang, *tint, AQUEDUCT, 1.0]
+                for k in range(n)]
 
     def _file_landforms(self, T, pl, roles, x0, y0, S, px, now):
         """Single landmarks at a file's site: a town hall for a project manifest, a power
@@ -560,11 +609,15 @@ class Synth:
         rows = []
         # (role, model, smallest and largest size in samples, tint)
         for role, model, lo, hi, tint in ((ROLE_CODE['hall'], HALL, 3, 7, (150, 96, 70)),
-                                          (ROLE_CODE['power'], POWER, 4, 10, (208, 204, 196)),
-                                          (ROLE_CODE['arch'], ARCH, 3, 20, (190, 104, 62))):
+                                          (ROLE_CODE['power'], POWER, 4, 10, (208, 204, 196))):
             for i in np.flatnonzero(inside & (roles == role)):
                 rows.append([x[i], y[i], float(np.clip(rf[i]*1.2, lo*px, hi*px)), (i*2.4) % math.tau, *tint, model, 1.0])
-        for i in np.flatnonzero(inside & (now-pl['mtime'] < 900)):
+        links = np.flatnonzero(inside & (roles == ROLE_CODE['arch']))
+        if links.size:
+            rows += self._aqueduct(x[links], y[links], rf[links], px, T, pl)
+        recent = np.flatnonzero(inside & (now-pl['mtime'] < 900))
+        self.transient = self.transient or recent.size > 0
+        for i in recent:
             rows.append([x[i]+rf[i]*0.25, y[i], 1.3*SP*px, 0.0, 236, 240, 238, STEAM, 1.0])
         if T.repo:
             town = [q for q in pl.get('patches', []) if q['kind'] == 'code']
@@ -598,12 +651,37 @@ class Synth:
                 continue
             if (T.node_id, pi) in self._city_done or not (x0 <= q['x'] < x0+S and y0 <= q['y'] < y0+S):
                 continue
-            rows.extend(self._city(q['x'], q['y'], q['side'], q['n'], q['kind'], T.path+str(pi), px))
+            rows.extend(self._city(q['x'], q['y'], q['side'], q['n'], q['kind'], T.path+str(pi), px,
+                                   self._river_axis(T, q['x'], q['y'])))
         return rows
 
-    def _city(self, x, y, side, n, kind, key, px):
+    def _river_axis(self, T, x, y):
+        """Where the nearest river runs past a point, from the drainage's own distance field.
+
+        Returns (angle along the bank, unit vector toward the water, distance in world units),
+        or None where no river is near. The same raster already parts the ridges at _ridges."""
+        if T.river_dist is None:
+            return None
+        u = (x-T.x0)/T.cell-0.5
+        v = (y-T.y0)/T.cell-0.5
+        if not (1 <= u < T.n-2 and 1 <= v < T.n-2):
+            return None
+        # The distance field grows away from the water, so its gradient points inland and the
+        # river itself runs across that: perpendicular to the gradient.
+        gx = float(_bilinear(T.river_dist, u+1, v, T.n)-_bilinear(T.river_dist, u-1, v, T.n))
+        gy = float(_bilinear(T.river_dist, u, v+1, T.n)-_bilinear(T.river_dist, u, v-1, T.n))
+        g = math.hypot(gx, gy)
+        if g < 1e-6:
+            return None
+        return math.atan2(gx, -gy), (-gx/g, -gy/g), float(_bilinear(T.river_dist, u, v, T.n))*T.cell
+
+    def _city(self, x, y, side, n, kind, key, px, axis=None):
         """A Civ-like city: a tight cluster of buildings on a golden-angle spiral, tallest at
-        the centre (more files, taller), low houses at its edge."""
+        the centre (more files, taller), low houses at its edge.
+
+        Given a river axis the town sits on the bank and grows along it rather than as a disc:
+        settlements follow water, and a ring of houses dropped on a patch centroid never read
+        as one."""
         b = 1.25*SP*px                                            # one building, as a map symbol
         if side < 3*b:
             return []
@@ -612,6 +690,17 @@ class Synth:
         count = min(count, int((R/b)**2/0.4)+1)
         h = stable_hash(key+'city')
         ang = (h % 628)/100
+        al = ac = 0.0
+        straddles = False
+        if axis is not None:
+            bank, toward, dist = axis
+            al, ac = math.cos(bank), math.sin(bank)
+            # A river already inside the town's reach is built across, not backed away from:
+            # the town sits astride it and the water divides it into two banks. Otherwise it
+            # walks to the water and stops its own edge short.
+            straddles = dist < R
+            step = dist if straddles else max(0.0, min(dist-R*0.4, 0.6*side))
+            x, y = x+toward[0]*step, y+toward[1]*step
         top = 1.0+1.1*min(3.0, math.log10(max(n, 1)))
         if kind == 'depot':
             top = min(top, 1.8)                                   # warehouses stay low
@@ -620,7 +709,11 @@ class Synth:
         for i in range(count):
             rr = R*math.sqrt((i+0.5)/count)
             a = i*golden+ang
-            cx, cy = x+rr*math.cos(a), y+rr*math.sin(a)
+            ox, oy = rr*math.cos(a), rr*math.sin(a)
+            if axis is not None:
+                along, across = ox*al+oy*ac, (-ox*ac+oy*al)*ACROSS_BANK
+                ox, oy = along*al-across*ac, along*ac+across*al
+            cx, cy = x+ox, y+oy
             jit = ((h >> (i % 40)) & 0xFF)/255
             hf = 1.0+(top-1.0)*(1-rr/R)**1.6*(0.55+0.45*jit)
             if kind == 'depot':
@@ -630,6 +723,11 @@ class Synth:
                 model = TOWER if hf > 2.4 else BLOCK if hf > 1.4 else (FLAT if kind != 'databases' else SILO)
                 tint = CITY_TINTS[(h >> (i % 23)) % len(CITY_TINTS)] if hf > 1.4 else ROOFS[(h >> (i % 17)) % len(ROOFS)]
             rows.append([cx, cy, b*(0.9+0.2*jit), ang, *tint, model, hf])
+        if straddles and count >= BRIDGE_MIN and (h >> 7) % 3:
+            # Astride the water, a town crosses it: one arch laid across the flow, the same
+            # masonry as an aqueduct's spans. Not every town — a crossing stays an event.
+            rows.append([x, y, float(np.clip(0.22*R, 2.5*px, 7*px)), bank+math.pi/2,
+                         196, 180, 150, AQUEDUCT, 1.0])
         self._cities.append((x, y, R+b))
         return rows
 

@@ -12,7 +12,7 @@ const MODEL_FIXED = [Color(0.30, 0.24, 0.18), Color(0.28, 0.22, 0.16), Color(0.8
 	Color(0.45, 0.36, 0.26), Color(0.36, 0.5, 0.3), Color(0.3, 0.26, 0.2), Color(0.28, 0.22, 0.16), Color(0.78, 0.66, 0.5),
 	Color(0.55, 0.5, 0.46), Color(0.62, 0.62, 0.6), Color(0.8, 0.79, 0.76), Color(0.6, 0.58, 0.56), Color(0.62, 0.58, 0.52),
 	Color(0.84, 0.78, 0.66), Color(0.86, 0.8, 0.66), Color(0.95, 0.96, 0.96), Color(0.7, 0.66, 0.58), Color(0.78, 0.66, 0.52),
-	Color(0.84, 0.82, 0.78), Color(0.7, 0.72, 0.74), Color(0.86, 0.8, 0.66)]
+	Color(0.84, 0.82, 0.78), Color(0.7, 0.72, 0.74), Color(0.86, 0.8, 0.66), Color(0.82, 0.76, 0.64)]
 const STEAM_MODEL = 16
 const FOV = 38.0                # horizontal field of view in perspective
 const SERIF = preload("res://fonts/Cartography.ttf")
@@ -25,6 +25,10 @@ const RENDER = 100.0            # render units across the view, at every zoom (f
 const EXAG = 4.0                # vertical exaggeration
 const SAMPLES = 257
 const TILES_ACROSS = 2.6        # tile size relative to the view width
+const FALLBACK_LEVELS = 2       # how far up a coarse stand-in may come from
+const SINK_PER_LEVEL = 1.2      # clearance under a coarse fallback, in render units.
+                                # It must exceed the coarse-vs-fine height error or the
+                                # fallback punches through the finer tile and z-fights.
 const MAX_INFLIGHT = 6
 const DETAIL_REPEATS = 5.0      # detail texture repeats across the view (per octave)
 const KIND_NAMES = {"pdf":"PDF", "images":"Image", "audio":"Audio", "video":"Video", "tables":"Table", "code":"Source",
@@ -574,7 +578,11 @@ func update_tiles():
 			continue
 		var parts = key.split(":")
 		var l = int(parts[0]); var tx = int(parts[1]); var ty = int(parts[2])
-		while l > 0:
+		# Only a near ancestor stands in. Further up, the fallback is drawn from a territory
+		# the finer tile has since descended out of, so its ground disagrees by more than any
+		# clearance can hide and the two surfaces fight.
+		var floor_l = maxi(0, l-FALLBACK_LEVELS)
+		while l > floor_l:
 			l -= 1; tx >>= 1; ty >>= 1
 			var up = tile_key(l, tx, ty)
 			if tiles.has(up) and not tiles[up].get("loading", false):
@@ -730,6 +738,21 @@ func load_detail_textures():
 	detail_array = Texture2DArray.new()
 	detail_array.create_from_images(images)
 
+func coverage(t) -> Array:
+	# Which sub-cells of a coarse stand-in the finer tiles have already drawn, so it can drop
+	# them rather than fight the finer ground for the same pixels.
+	var d = level-t.level
+	if d <= 0 or d > FALLBACK_LEVELS:
+		return [0, 1]
+	var n = 1 << d
+	var mask = 0
+	for j in n:
+		for i in n:
+			var k = tile_key(level, t.x*n+i, t.y*n+j)
+			if tiles.has(k) and not tiles[k].get("loading", false) and tiles[k].node.visible:
+				mask |= 1 << (j*n+i)
+	return [mask, n]
+
 func place_tiles():
 	var scale = RENDER/view*EXAG
 	# Detail repeats every P world units (P a power of two near a sixth of the view), cross-faded
@@ -747,7 +770,10 @@ func place_tiles():
 		t.node.scale = Vector3(S/view*RENDER, 1.0, S/view*RENDER)
 		t.mat.set_shader_parameter("height_scale", scale)
 		t.mat.set_shader_parameter("height_offset", (t.base-h_ref)*scale)
-		t.mat.set_shader_parameter("sink", 0.0 if t.level == level else RENDER*0.004*(level-t.level))
+		t.mat.set_shader_parameter("sink", 0.0 if t.level == level else SINK_PER_LEVEL*(level-t.level))
+		var cover = coverage(t)
+		t.mat.set_shader_parameter("covered", cover[0])
+		t.mat.set_shader_parameter("covered_n", cover[1])
 		t.mat.set_shader_parameter("weather_on", 1.0 if weather_on else 0.0)
 		t.mat.set_shader_parameter("time_s", clock)
 		var ox = t.x*S
@@ -763,7 +789,7 @@ func place_tiles():
 			m.set_shader_parameter("tile_world", S)
 			m.set_shader_parameter("height_scale", scale)
 			m.set_shader_parameter("height_offset", (t.base-h_ref)*scale)
-			m.set_shader_parameter("sink", 0.0 if t.level == level else RENDER*0.004*(level-t.level))
+			m.set_shader_parameter("sink", 0.0 if t.level == level else SINK_PER_LEVEL*(level-t.level))
 			m.set_shader_parameter("appear", smoothstep(0.0, 0.5, clock-float(t.get("born", 0.0))))
 	ocean.position = Vector3(0, (0.0-h_ref)*scale-0.05, 0)
 
@@ -1370,7 +1396,7 @@ func fill_legend():
 The whole filesystem is surveyed into one continuous map. The survey keeps running in the background, coarse to fine; parchment marks terra incognita it has not reached yet. Every folder owns a territory sized by what it holds; its own files stand in its home district.
 
 [color=#d9c68f][b]Continents are disks[/b][/color]
-The Linux (WSL) disk is one continent; each Windows drive (C:, D:, E:…) and each cloud drive is another, across open sea. Inside a disk everything is one landmass: provinces share borders along ridgelines.
+The root disk is one continent, named for the system it carries; every other drive is another across open sea — under WSL that means each Windows drive (C:, D:, E:…) and each cloud drive. Inside a disk everything is one landmass: provinces share borders along ridgelines.
 
 [color=#d9c68f][b]Water flows toward the parent folder[/b][/color]
 Every folder's water leaves at its outlet and runs down the valleys between provinces to its parent, and on to the sea. Streams meet as tributaries and widen with what they carry. Lakes pool where many subfolders meet; waterfalls mark where a river crosses onto other ground (another filesystem, or the edge of what you may write); each disk's great river ends in a delta.
@@ -1607,5 +1633,14 @@ func _smoke_test():
 		for node in fading: node.modulate.a = 1.0
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(capture_path)
-	print("BRANCH_SMOKE_OK tiles=", tiles.size(), " level=", level, " labels=", place_labels.size(), " here=", here.map(func(p): return p.name))
+	# Frames over a short settled window: the renderer's own cost, with every tile already in.
+	var frames = 0
+	var t_start = Time.get_ticks_msec()
+	while Time.get_ticks_msec()-t_start < 2000:
+		await RenderingServer.frame_post_draw
+		frames += 1
+	var fps = frames*1000.0/maxf(1.0, Time.get_ticks_msec()-t_start)
+	print("BRANCH_SMOKE_OK tiles=", tiles.size(), " level=", level, " labels=", place_labels.size(),
+		" fps=", "%.1f" % fps, " tris=", tiles.size()*(tile_mesh.subdivide_width+1)*(tile_mesh.subdivide_depth+1)*2,
+		" here=", here.map(func(p): return p.name))
 	get_tree().quit()
