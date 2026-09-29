@@ -57,6 +57,11 @@ var tiles = {}                  # "l:x:y" -> {node, mat, level, x, y, base, heig
 var wanted = {}
 var queued = []
 var inflight = 0
+# One outstanding pick and one outstanding label sweep at a time. Both walk the world in this
+# process rather than in a tile worker, so on cold ground they take longer than the timer that
+# asks for them; without this they queue up faster than they drain and starve each other out.
+var here_busy = false
+var places_busy = false
 var level = 0
 var serial = 0
 var tile_mesh: PlaneMesh
@@ -527,7 +532,10 @@ func api(endpoint: String, data: Variant = null) -> Dictionary:
 	var response = await request.request_completed
 	request.queue_free()
 	if response[0] != HTTPRequest.RESULT_SUCCESS:
-		return {"error":"The file service request failed or timed out."}
+		# Which failure it was matters: a timeout, a refused connection and a dropped socket
+		# all arrive here, and saying only "failed or timed out" has sent us chasing the wrong
+		# one before now.
+		return {"error":"The file service request failed (result %d, HTTP %d) on %s" % [response[0], response[1], endpoint]}
 	var parsed = JSON.parse_string(response[3].get_string_from_utf8())
 	return parsed if parsed is Dictionary else {"error":"Invalid response from the file service."}
 
@@ -927,9 +935,14 @@ func view_bbox() -> Array:
 	return [xs.min(), ys.min(), xs.max(), ys.max()]
 
 func refresh_places():
+	if places_busy:
+		places_dirty = true
+		return
+	places_busy = true
 	var b = view_bbox()
 	var px = view/get_viewport().get_visible_rect().size.x
 	var data = await api("/places?x0=%s&y0=%s&x1=%s&y1=%s&px=%s" % [num(b[0]), num(b[1]), num(b[2]), num(b[3]), num(px)])
+	places_busy = false
 	if data.has("error"): return
 	for item in place_labels: item.widget.queue_free()
 	place_labels.clear()
@@ -1013,10 +1026,14 @@ func position_labels():
 		w.visible = true
 
 func refresh_here():
+	if here_busy:
+		return
+	here_busy = true
 	var vp = get_viewport().get_visible_rect().size
 	var c = screen_to_world(vp/2)
 	var px = view/vp.x
 	var data = await api("/at?x=%s&y=%s&px=%s" % [num(c.x), num(c.y), num(px*4)])
+	here_busy = false
 	if data.has("error"): return
 	# You are "in" the deepest place that still fills a good part of the view.
 	var chain = []
@@ -1615,16 +1632,26 @@ func wait_for_terrain(limit_ms: int):
 		steady = steady+1 if loaded == wanted.size() and loaded > 0 and not flying else 0
 		if steady >= 3: return
 
+func smoke_ok(condition: bool, what: String) -> bool:
+	# assert() only halts a debug build and leaves the process exiting 0, so a failed smoke run
+	# reads as a pass from a shell. Say what went wrong and exit non-zero.
+	if condition:
+		return true
+	printerr("BRANCH_SMOKE_FAIL ", what)
+	print("BRANCH_SMOKE_FAIL ", what)
+	get_tree().quit(1)
+	return false
+
 func _smoke_test():
 	var args = OS.get_cmdline_user_args()
 	await wait_for_terrain(90000)
-	assert(not tiles.is_empty(), "No terrain tiles arrived")
+	if not smoke_ok(not tiles.is_empty(), "No terrain tiles arrived"): return
 	var enter_index = args.find("--enter")
 	if enter_index >= 0 and enter_index+1 < args.size():
 		await travel_to(args[enter_index+1], true)
 		await wait_for_terrain(90000)
 	var pick_result = await api("/at?x=%s&y=%s&px=%s" % [num(cam_x), num(cam_y), num(view/1440.0)])
-	assert(not pick_result.has("error"), "Picking failed")
+	if not smoke_ok(not pick_result.has("error"), "Picking failed: "+str(pick_result.get("error", ""))): return
 	refresh_places()
 	await get_tree().create_timer(2.0).timeout
 	if "--legend" in args: toggle_legend()
@@ -1634,12 +1661,16 @@ func _smoke_test():
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(capture_path)
 	# Frames over a short settled window: the renderer's own cost, with every tile already in.
-	var frames = 0
-	var t_start = Time.get_ticks_msec()
-	while Time.get_ticks_msec()-t_start < 2000:
-		await RenderingServer.frame_post_draw
-		frames += 1
-	var fps = frames*1000.0/maxf(1.0, Time.get_ticks_msec()-t_start)
+	# Headless draws nothing, so frame_post_draw never comes and waiting on it is a hang at
+	# best; report no rate there rather than inventing one.
+	var fps = 0.0
+	if DisplayServer.get_name() != "headless":
+		var frames = 0
+		var t_start = Time.get_ticks_msec()
+		while Time.get_ticks_msec()-t_start < 2000:
+			await RenderingServer.frame_post_draw
+			frames += 1
+		fps = frames*1000.0/maxf(1.0, Time.get_ticks_msec()-t_start)
 	print("BRANCH_SMOKE_OK tiles=", tiles.size(), " level=", level, " labels=", place_labels.size(),
 		" fps=", "%.1f" % fps, " tris=", tiles.size()*(tile_mesh.subdivide_width+1)*(tile_mesh.subdivide_depth+1)*2,
 		" here=", here.map(func(p): return p.name))

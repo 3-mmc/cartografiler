@@ -70,6 +70,12 @@ def bounded_extract(path, kind):
 
 class Service(ThreadingHTTPServer):
     daemon_threads = True
+    # The client opens a connection per request: MAX_INFLIGHT tiles at once, plus status,
+    # places and whatever the pointer is asking about. socketserver's default backlog of 5 is
+    # smaller than that, and a connection that is never accepted is not refused either — the
+    # client simply waits out its twenty seconds and reports no response, which is what made
+    # picking "fail" on cold ground.
+    request_queue_size = 128
 
     def __init__(self, start, atlas=False):
         super().__init__(('127.0.0.1',0),Handler)
@@ -245,6 +251,25 @@ class Handler(BaseHTTPRequestHandler):
         return secrets.compare_digest(self.headers.get('Authorization',''), 'Bearer '+self.server.token)
 
     def do_GET(self):
+        if os.environ.get('BRANCH_TRACE'):
+            import time as _t
+            _t0 = _t.perf_counter()
+            try:
+                return self._do_GET_traced(_t0)
+            finally:
+                pass
+        return self._do_GET()
+
+    def _do_GET_traced(self, t0):
+        import time as _t
+        path = self.path.split('?')[0]
+        print(f'[trace] -> {path}', flush=True)
+        try:
+            return self._do_GET()
+        finally:
+            print(f'[trace] <- {path} {(_t.perf_counter()-t0)*1000:.0f} ms', flush=True)
+
+    def _do_GET(self):
         if not self.authorized():
             return self.reply(403,{'error':'Authentication required.'})
         url = urlsplit(self.path)

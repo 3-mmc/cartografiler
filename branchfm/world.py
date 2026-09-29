@@ -38,6 +38,10 @@ OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
 LAYOUT_VERSION = 16          # bump when the layout changes shape, so cached territories are redone
+# A store is a cache, and must never keep a request waiting longer than the client will. Six
+# worker processes and this one all write it, and SQLite's busy wait was 30 s against a client
+# that gives up at 20: picking then timed out rather than simply redrawing.
+CACHE_BUSY_TIMEOUT = 5.0
 
 
 def system_name() -> str:
@@ -642,7 +646,7 @@ class LayoutStore:
         import sqlite3
         db = getattr(self.local, 'db', None)
         if db is None:
-            db = sqlite3.connect(self.location, timeout=30, check_same_thread=False)
+            db = sqlite3.connect(self.location, timeout=CACHE_BUSY_TIMEOUT, check_same_thread=False)
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('PRAGMA synchronous=NORMAL')
             self.local.db = db

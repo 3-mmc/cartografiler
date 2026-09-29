@@ -19,7 +19,7 @@ import numpy as np
 
 from .index import Index, Surveyor
 from .tiles import N, Synth, encode
-from .world import HOME, LAYOUT_VERSION, SEA, World, climate, label_at
+from .world import CACHE_BUSY_TIMEOUT, HOME, LAYOUT_VERSION, SEA, World, climate, label_at
 
 FULL_SURVEY_EVERY = 12*3600
 TILE_CACHE_MAX_AGE = 24*3600    # colour fades with a folder's age in days; a day's drift is invisible
@@ -27,15 +27,20 @@ TILE_CACHE_MAX_AGE = 24*3600    # colour fades with a folder's age in days; a da
 
 def _codec():
     """zstd where it is installed, deflate otherwise. On real tiles zstd-3 stores a third
-    against deflate's 45% and is quicker both ways, and every cache hit pays the read."""
+    against deflate's 45% and is quicker both ways, and every cache hit pays the read.
+
+    A compressor is built per call on purpose. Tiles are stored from several request threads
+    at once and a zstandard compressor is not thread-safe: shared, it corrupts its own state
+    and aborts the process inside ZSTD_storeSeq. Building one costs microseconds against the
+    milliseconds of the compression itself."""
     try:
         import zstandard
     except ImportError:
         import zlib
         return b'D', lambda d: zlib.compress(d, 1), zlib.decompress
-    c = zstandard.ZstdCompressor(level=3)
-    d = zstandard.ZstdDecompressor()
-    return b'Z', c.compress, d.decompress
+    return (b'Z',
+            lambda d: zstandard.ZstdCompressor(level=3).compress(d),
+            lambda d: zstandard.ZstdDecompressor().decompress(d))
 
 
 TILE_CODEC, _compress, _decompress = _codec()
@@ -88,7 +93,7 @@ class TileStore:
         import sqlite3
         db = getattr(self.local, 'db', None)
         if db is None:
-            db = sqlite3.connect(self.location, timeout=30, check_same_thread=False)
+            db = sqlite3.connect(self.location, timeout=CACHE_BUSY_TIMEOUT, check_same_thread=False)
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('PRAGMA synchronous=NORMAL')
             self.local.db = db
