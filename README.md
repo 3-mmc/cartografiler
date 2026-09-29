@@ -2,8 +2,9 @@
 
 A native, local file manager in which your whole filesystem is **one continuous world
 map**. Each disk is a continent. Every folder owns a territory sized by what it holds,
-rivers drain toward the parent folder, land cover follows content (photographs grow
-forest, code builds towns), and single files stand as landmarks when you come close.
+rivers run down the valleys between folders toward the parent and on to a delta, land cover
+follows content, and a folder's own files lie as fields: one patch per kind (a forest of
+images, a town of source files, a massif of PDFs), one parcel per file.
 The geography is continuous and irregular, with no tiles, board or grid.
 
 ## Run on this machine
@@ -70,11 +71,12 @@ files are not loaded.
 
 The grammar and its reasoning are in **[docs/cartography.md](docs/cartography.md)** and in
 the app (`K`). In short: continents are disks, climate is the filesystem and write
-permission, territory is size, water flows toward the parent, land cover is content, rock is
-age (basalt → sandstone → granite), snow is dormancy, and the optional radar shows files
-changed today. Features from the earlier nested-map version that haven't yet moved into
-the continuous world are listed there too: tides, sea level, roads, time slider, and
-page-count mountains.
+permission, territory is size, water flows toward the parent (tributaries, hub lakes,
+waterfalls where the ground changes, deltas at the sea), land cover is content, files are
+fields, rock is age (basalt → sandstone → granite), snow is dormancy, and the optional radar
+shows files changed today. Features from the earlier nested-map version that haven't yet
+moved into the continuous world are listed there too: tides, sea level, roads, time
+slider, and page-count mountains.
 
 ## Previews and file operations
 
@@ -91,11 +93,12 @@ page-count mountains.
 |---|---|
 | Survey index and native crawlers (Linux `scandir`, Windows Python worker) | `branchfm/index.py` |
 | World layout: power-diagram territories, fractal borders, rivers, landmarks | `branchfm/world.py` |
-| Terrain synthesis: 257² height/colour/aux tiles at any zoom | `branchfm/tiles.py` |
+| Terrain synthesis: 257² height/colour/aux/material tiles at any zoom; fields, rivers, lakes, deltas | `branchfm/tiles.py` |
+| CC0 ground textures (Poly Haven) and their baker | `native/textures/`, `tools/fetch_textures.py` |
 | Map service: tiles (worker processes), labels, picking, survey status | `branchfm/atlas_api.py`, `branchfm/service.py` |
 | Native client: streaming terrain, floating origin, overlays | `native/main.gd`, `native/terrain.gdshader` |
 
-Tiles are generated on demand in a pool of worker processes, about 0.1 s each once warm.
+Tiles are generated on demand in a pool of worker processes, about 0.3–0.5 s each.
 The client keeps the view 100 render units wide at any zoom (floating origin) with world
 coordinates in doubles. Territories are laid out lazily, the first time the map needs a
 place's interior, and cached on disk.

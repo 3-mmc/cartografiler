@@ -97,8 +97,55 @@ class WorldTests(unittest.TestCase):
     def test_tile_encoding(self):
         tile = Synth(self.world).tile(0, 0, 0)
         body = encode(tile)
-        self.assertEqual(body[:4], b'BTL1')
-        self.assertEqual(len(body), 36+N*N*4*3)
+        self.assertEqual(body[:4], b'BTL2')
+        self.assertEqual(len(body), 36+N*N*4*5)
+
+    def test_files_of_a_kind_form_one_patch(self):
+        # Mixed files in one folder: each kind clusters into a cohesive patch, not confetti.
+        mixed = self.tree/'mixed'
+        mixed.mkdir()
+        for i in range(60):
+            (mixed/f'photo-{i:02d}.jpg').touch()
+            (mixed/f'sheet-{i:02d}.csv').touch()
+            (mixed/f'script-{i:02d}.py').touch()
+        survey(self.index, self.tree)
+        world = World(self.index)
+        try:
+            t = world.territory_for(str(mixed))
+            pl = t.places
+            self.assertEqual(pl['n'], 180)
+            self.assertEqual({q['kind'] for q in pl['patches']}, {'images', 'tables', 'code'})
+            from scipy.spatial import cKDTree
+            pts = np.column_stack([pl['x'], pl['y']])
+            _, nb = cKDTree(pts).query(pts, k=2)
+            kinds = np.array(pl['kinds'])
+            self.assertGreater((kinds[nb[:, 1]] == kinds).mean(), 0.9)
+            # Parcels run alphabetically: names sorted within each patch.
+            for q in range(len(pl['patches'])):
+                names = [pl['names'][i] for i in np.flatnonzero(pl['patch'] == q)]
+                self.assertEqual(names, sorted(names, key=str.casefold))
+        finally:
+            world.store.close()
+
+    def test_rivers_form_a_network(self):
+        # Tributaries end on other streams (confluences); widths never shrink downstream.
+        t = self.world.territory_for(str(self.tree))
+        streams = [r for r in t.rivers if r['kind'] == 'stream']
+        self.assertGreaterEqual(len(streams), 2)
+        for r in streams:
+            self.assertTrue(np.all(np.diff(r['w']) >= -1e-12))
+        ends = [tuple(np.round(r['pts'][-1], 12)) for r in streams[1:]]
+        on_network = 0
+        for e in ends:
+            for other in streams:
+                if other is not None and np.min(np.hypot(other['pts'][:, 0]-e[0], other['pts'][:, 1]-e[1])) < t.cell:
+                    on_network += 1
+                    break
+        self.assertEqual(on_network, len(ends))
+
+    def test_continents_end_in_deltas(self):
+        root = self.world.root()
+        self.assertTrue(any('delta' in lake for lake in root.lakes) or root.mouth is None)
 
     def test_disks_are_continents(self):
         self.assertEqual(World.continent_of('/mnt/e/Photos/x.jpg'), '/mnt/e')

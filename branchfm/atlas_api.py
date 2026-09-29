@@ -33,6 +33,15 @@ def zone_for(path: str):
     return fs['zone'], fs.get('writable', True)
 
 
+PLURAL = {'pdf': 'PDFs', 'images': 'images', 'video': 'videos', 'audio': 'recordings', 'tables': 'tables',
+          'code': 'source files', 'databases': 'databases', 'archives': 'archives', 'binaries': 'executables',
+          'disks': 'disk images', 'documents': 'documents', 'other': 'other files'}
+
+
+def patch_name(kind: str, n: int) -> str:
+    return f"{n:,} {PLURAL.get(kind, 'files')}"
+
+
 def climate_for(path: str) -> str:
     zone, writable = zone_for(path)
     return zone if writable else 'alpine'
@@ -135,6 +144,7 @@ class Atlas:
         """Names to print on the map: regions at least ~50 px across, files at least ~6 px."""
         regions = []
         files = []
+        patches = []
         root = self.world.root()
         if root.node.get('continent'):
             c = root.node['continent']
@@ -151,11 +161,13 @@ class Atlas:
                 if bx1 < x0 or by1 < y0 or bx0 > x1 or by0 > y1:
                     continue
                 side_px = c['side']/px
-                if side_px < 50:
+                # Hidden folders (.git, .cache…) are named only when they are big on screen.
+                hidden = '/.' in c['path']
+                if side_px < (140 if hidden else 60):
                     continue
                 kind = 'continent' if (t.continental and not c.get('same_land', True)) else 'region'
                 regions.append({'name': c['name'], 'path': c['path'], 'x': c['centroid'][0], 'y': c['centroid'][1],
-                                'side': c['side'], 'depth': depth+1, 'kind': kind, 'scanned': c['scanned'],
+                                'side': c['side']*(0.4 if hidden else 1.0), 'depth': depth+1, 'kind': kind, 'scanned': c['scanned'],
                                 'files': c['files'], 'dirs': c['dirs']})
                 if side_px >= 160:
                     inner = self.world.child(t, c)
@@ -163,14 +175,31 @@ class Atlas:
                         stack.append((inner, depth+1))
             pl = t.places
             if pl.get('n'):
+                # A patch is named as a whole ("412 images") until its parcels are big enough
+                # to carry their own names.
+                for q in pl.get('patches', []):
+                    if q['n'] > 1 and q['side']/px >= 50 and x0 < q['x'] < x1 and y0 < q['y'] < y1:
+                        patches.append({'name': patch_name(q['kind'], q['n']), 'x': q['x'], 'y': q['y'], 'side': q['side'],
+                                        'kind': q['kind'], 'n': q['n'], 'path': t.path})
                 r = pl['r']
-                vis = np.flatnonzero((r/px >= 6) & (pl['x'] > x0) & (pl['x'] < x1) & (pl['y'] > y0) & (pl['y'] < y1))
-                for i in vis[np.argsort(-r[vis])][:300]:
+                need = 36 if '/.' in t.path+'/' else 18
+                vis = np.flatnonzero((r/px >= need) & (pl['x'] > x0) & (pl['x'] < x1) & (pl['y'] > y0) & (pl['y'] < y1))
+                # A handful of names per patch (the largest files), more as parcels grow:
+                # a field of 80 captions is one place, not 80 labels.
+                if vis.size and 'patch' in pl:
+                    keep = []
+                    budget = int(np.clip(np.median(r[vis])/px/4, 6, 40))
+                    for q in np.unique(pl['patch'][vis]):
+                        members = vis[pl['patch'][vis] == q]
+                        keep.extend(members[np.argsort(-pl['size'][members], kind='stable')][:budget])
+                    vis = np.array(keep, dtype=np.int64)
+                for i in vis[np.argsort(-r[vis])][:120]:
                     files.append({'name': pl['names'][i], 'path': pl['paths'][i], 'x': float(pl['x'][i]),
                                   'y': float(pl['y'][i]), 'r': float(r[i]), 'kind': pl['kinds'][i]})
         regions.sort(key=lambda r: -r['side'])
         files.sort(key=lambda f: -f['r'])
-        return {'regions': regions[:250], 'files': files[:300]}
+        patches.sort(key=lambda q: -q['side'])
+        return {'regions': regions[:200], 'files': files[:120], 'patches': patches[:60]}
 
     def at(self, x: float, y: float, px: float) -> dict:
         """What is under a point: the chain of places, and the file landmark if one is hit."""
@@ -187,7 +216,7 @@ class Atlas:
                 if pl.get('n'):
                     d = np.hypot(pl['x']-x, pl['y']-y)
                     i = int(np.argmin(d))
-                    if d[i] < max(pl['r'][i]*1.4, px*8):
+                    if d[i] < max(pl['r'][i]*1.3, px*8):
                         found = {'name': pl['names'][i], 'path': pl['paths'][i], 'x': float(pl['x'][i]), 'y': float(pl['y'][i]),
                                  'r': float(pl['r'][i]), 'kind': pl['kinds'][i]}
                 break
@@ -223,8 +252,10 @@ class Atlas:
         if pl.get('n') and path in pl['paths']:
             i = pl['paths'].index(path)
             r = float(pl['r'][i])
-            return {'path': path, 'name': pl['names'][i], 'x': float(pl['x'][i]), 'y': float(pl['y'][i]), 'side': r*2,
-                    'bbox': (float(pl['x'][i])-r, float(pl['y'][i])-r, float(pl['x'][i])+r, float(pl['y'][i])+r), 'file': True}
+            # Framed with its neighbours around it: a parcel is read in its patch.
+            return {'path': path, 'name': pl['names'][i], 'x': float(pl['x'][i]), 'y': float(pl['y'][i]), 'side': r*6,
+                    'bbox': (float(pl['x'][i])-r*3, float(pl['y'][i])-r*3, float(pl['x'][i])+r*3, float(pl['y'][i])+r*3),
+                    'file': True, 'kind': pl['kinds'][i], 'r': r}
         return {'error': 'Not on the map yet. The survey has been asked to go there first.'}
 
     @staticmethod

@@ -16,6 +16,7 @@ const EXAG = 4.0                # vertical exaggeration
 const SAMPLES = 257
 const TILES_ACROSS = 2.6        # tile size relative to the view width
 const MAX_INFLIGHT = 6
+const DETAIL_REPEATS = 5.0      # detail texture repeats across the view (per octave)
 const KIND_NAMES = {"pdf":"PDF", "images":"Image", "audio":"Audio", "video":"Video", "tables":"Table", "code":"Source",
 	"archives":"Archive", "binaries":"Executable", "disks":"Disk image", "databases":"Database", "documents":"Document", "other":"File"}
 
@@ -67,6 +68,7 @@ var survey = {}
 var world: Node3D
 var camera: Camera3D
 var sun: DirectionalLight3D
+var detail_array: Texture2DArray
 var ocean: MeshInstance3D
 var marker: MeshInstance3D
 var screen_ui: Control
@@ -410,6 +412,7 @@ func _build_ui():
 	get_window().min_size = Vector2i(900, 600)
 
 func _build_world():
+	load_detail_textures()
 	world = Node3D.new()
 	add_child(world)
 	var environment = WorldEnvironment.new()
@@ -430,7 +433,7 @@ func _build_world():
 	environment.environment = config
 	world.add_child(environment)
 	sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-38, -35, 0)
+	sun.rotation_degrees = Vector3(-30, -35, 0)
 	sun.light_color = Color("fff0d6")
 	sun.light_energy = 1.35
 	sun.shadow_enabled = true
@@ -602,7 +605,7 @@ func fetch_tile(l: int, x: int, y: int):
 	pump_requests()
 
 func install_tile(key: String, body: PackedByteArray):
-	if body.size() < 36 or body.slice(0, 4).get_string_from_ascii() != "BTL1":
+	if body.size() < 36 or body.slice(0, 4).get_string_from_ascii() != "BTL2":
 		if tiles.has(key) and tiles[key].get("loading", false): tiles.erase(key)
 		return
 	var n = body.decode_u32(4)
@@ -618,11 +621,19 @@ func install_tile(key: String, body: PackedByteArray):
 	colour.generate_mipmaps()
 	offset += plane*4
 	var aux = Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, body.slice(offset, offset+plane*4))
+	offset += plane*4
+	var mat_a = Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, body.slice(offset, offset+plane*4))
+	offset += plane*4
+	var mat_b = Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, body.slice(offset, offset+plane*4))
 	var mat = ShaderMaterial.new()
 	mat.shader = TERRAIN_SHADER
 	mat.set_shader_parameter("heightmap", ImageTexture.create_from_image(heights))
 	mat.set_shader_parameter("colormap", ImageTexture.create_from_image(colour))
 	mat.set_shader_parameter("auxmap", ImageTexture.create_from_image(aux))
+	mat.set_shader_parameter("mat_a", ImageTexture.create_from_image(mat_a))
+	mat.set_shader_parameter("mat_b", ImageTexture.create_from_image(mat_b))
+	if detail_array != null:
+		mat.set_shader_parameter("detail", detail_array)
 	var S = pow(0.5, l)
 	mat.set_shader_parameter("texel_world", S/float(n-1))
 	mat.set_shader_parameter("exaggeration", EXAG)
@@ -637,8 +648,28 @@ func install_tile(key: String, body: PackedByteArray):
 	tiles[key] = {"node":node, "mat":mat, "level":l, "x":x, "y":y, "base":base, "heights":heights, "S":S, "age":0}
 	places_dirty = true
 
+func load_detail_textures():
+	# CC0 ground detail (native/textures, fetched by tools/fetch_textures.py), one layer per material.
+	var images: Array[Image] = []
+	for name in ["meadow", "forest", "field", "town", "wet", "snow", "rock", "sand"]:
+		var image = Image.load_from_file(ProjectSettings.globalize_path("res://textures/%s.png" % name))
+		if image == null or image.is_empty():
+			push_warning("Missing detail texture %s; run tools/fetch_textures.py" % name)
+			return
+		image.convert(Image.FORMAT_RGBA8)
+		image.generate_mipmaps()
+		images.append(image)
+	detail_array = Texture2DArray.new()
+	detail_array.create_from_images(images)
+
 func place_tiles():
 	var scale = RENDER/view*EXAG
+	# Detail repeats every P world units (P a power of two near a sixth of the view), cross-faded
+	# with the next octave so the grain never jumps while zooming.
+	var lp = log(view/DETAIL_REPEATS)/log(2.0)
+	var P0 = pow(2.0, floor(lp))
+	var P1 = P0*2.0
+	var mix_f = lp-floor(lp)
 	for key in tiles:
 		var t = tiles[key]
 		if t.get("loading", false) or not t.node.visible:
@@ -651,6 +682,11 @@ func place_tiles():
 		t.mat.set_shader_parameter("sink", 0.0 if t.level == level else RENDER*0.004*(level-t.level))
 		t.mat.set_shader_parameter("weather_on", 1.0 if weather_on else 0.0)
 		t.mat.set_shader_parameter("time_s", clock)
+		var ox = t.x*S
+		var oy = t.y*S
+		t.mat.set_shader_parameter("detail_uv0", Vector4(fposmod(ox/P0, 1.0), fposmod(oy/P0, 1.0), S/P0, S/P0))
+		t.mat.set_shader_parameter("detail_uv1", Vector4(fposmod(ox/P1, 1.0), fposmod(oy/P1, 1.0), S/P1, S/P1))
+		t.mat.set_shader_parameter("detail_mix", mix_f)
 	ocean.position = Vector3(0, (0.0-h_ref)*scale-0.05, 0)
 
 func height_at(x: float, y: float) -> float:
@@ -799,6 +835,10 @@ func refresh_places():
 		var font_size = 26 if continent else clampi(int(9+log(size_px)/log(2.0)*1.5), 12, 22)
 		var w = make_label(text, SERIF, font_size, Color("f1ead4") if continent else Color("e6dfc6"), 2 if continent else 1)
 		place_labels.append({"widget":w, "x":float(r.x), "y":float(r.y), "priority":size_px*(4.0 if continent else 1.0), "region":true, "data":r})
+	for q in data.get("patches", []):
+		var size_px = float(q.side)/px
+		var w = make_label(q.name, ITALIC, clampi(int(8+log(size_px)/log(2.0)*1.2), 11, 16), Color("e9d9a8"), 1)
+		place_labels.append({"widget":w, "x":float(q.x), "y":float(q.y), "priority":size_px*1.5, "region":false, "data":q})
 	for f in data.get("files", []):
 		var w = make_label(f.name, ITALIC, 12, Color("f3edd8"), 1)
 		place_labels.append({"widget":w, "x":float(f.x), "y":float(f.y)+float(f.r)*1.1, "priority":float(f.r)/px, "region":false, "data":f})
@@ -1105,7 +1145,7 @@ func reading_for_region(p: Dictionary) -> String:
 	var top = []
 	for k in kinds: top.append([int(kinds[k]), k])
 	top.sort_custom(func(a, b): return a[0] > b[0])
-	var cover = {"images":"forest", "video":"forest", "tables":"fields", "code":"towns", "databases":"towns", "pdf":"meadow and uplands",
+	var cover = {"images":"forest", "video":"canyon country", "tables":"fields", "code":"towns", "databases":"towns", "pdf":"meadow and uplands",
 		"documents":"meadow", "audio":"wetland", "archives":"ice", "binaries":"bare rock", "disks":"bare rock", "other":"scrub"}
 	var parts = []
 	for i in mini(3, top.size()): parts.append("%s (%s)" % [cover.get(top[i][1], "scrub"), top[i][1]])
@@ -1119,9 +1159,9 @@ func reading_for_region(p: Dictionary) -> String:
 	return text
 
 func reading_for_file(p: Dictionary) -> String:
-	var forms = {"pdf":"A mountain; its rock shows age (dark basalt when new, pale granite when old).", "images":"A wood.",
-		"audio":"A lake.", "video":"A lake below a falls.", "tables":"Fields.", "code":"A settlement.", "databases":"A settlement.",
-		"archives":"A glacier.", "binaries":"An obsidian outcrop.", "disks":"A caldera.", "documents":"Meadow, in flower.", "other":"A cairn."}
+	var forms = {"pdf":"A peak of the massif; its rock shows age (dark basalt when new, pale granite when old).", "images":"A stand of the forest.",
+		"audio":"A reed bed with pools.", "video":"A mesa of banded strata: film is banded in frames, and a long one stands tall.", "tables":"A field.", "code":"A city block.", "databases":"A city block with slate roofs.",
+		"archives":"A tongue of the glacier.", "binaries":"An obsidian flow.", "disks":"A caldera.", "documents":"A meadow in flower.", "other":"Scrub with a cairn."}
 	return forms.get(p.get("kind", "other"), "A cairn.")
 
 func deselect():
@@ -1222,10 +1262,10 @@ The whole filesystem is surveyed into one continuous map. The survey keeps runni
 The Linux (WSL) disk is one continent; each Windows drive (C:, D:, E:…) and each cloud drive is another, across open sea. Inside a disk everything is one landmass: provinces share borders along ridgelines.
 
 [color=#d9c68f][b]Water flows toward the parent folder[/b][/color]
-Rivers drain every territory to its parent's capital and on to the sea. Tributaries are sized by what they carry.
+Every folder's water leaves at its outlet and runs down the valleys between provinces to its parent, and on to the sea. Streams meet as tributaries and widen with what they carry. Lakes pool where many subfolders meet; waterfalls mark where a river crosses onto other ground (another filesystem, or the edge of what you may write); each disk's great river ends in a delta.
 
 [color=#d9c68f][b]Land cover is content[/b][/color]
-Forest: images and video. Fields: tables. Towns: source code and databases. Meadow: documents. Wetland: audio. Ice: archives. Bare rock: executables and disk images. Up close, single files appear as landmarks: mountains (PDFs, rock by age), woods, lakes, fields, settlements, glaciers, obsidian, calderas, cairns.
+A folder's own files lie as fields: each kind is one patch (a forest of images, a field system of tables, a town of source files) and each file one parcel of it, in alphabetical order across the patch. Far off, a patch is one colour; closer, it divides into fields with hedgerows, city blocks with streets, the peaks of a massif (PDFs, rock by age), a crevassed glacier (archives), mesas of banded strata (video), reed beds and pools (audio), obsidian flows (executables), calderas (disk images), flowering meadow (documents) and scrub with cairns (anything else).
 
 [color=#d9c68f][b]Rock is age, snow is dormancy[/b][/color]
 Ridgelines show the age of their region: dark basalt when changed recently, sandstone within three years, pale granite when old. Regions untouched for over two years are snowbound.

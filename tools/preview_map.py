@@ -30,9 +30,10 @@ def main():
     ap.add_argument('--path', default='/')
     ap.add_argument('--tiles', type=int, default=3)
     ap.add_argument('--zoom', type=float, default=1.0, help='>1 zooms into the place')
+    ap.add_argument('--layers', action='store_true', help='also write the colour and the hillshade alone')
     a = ap.parse_args()
     from branchfm.atlas_api import Atlas
-    atlas = Atlas('/', index=Index(a.index) if a.index else None, survey=False)
+    atlas = Atlas('/', index=Index(a.index) if a.index else None, survey=False, workers=0)
     world, synth = atlas.world, atlas.synth
     if a.path == '/':
         cx, cy, span = 0.5, 0.5, 1.0
@@ -69,6 +70,10 @@ def main():
     water = colour[..., 3:4]/255
     lit = colour[..., :3]*(0.35+0.85*shade[..., None])*(1-water) + colour[..., :3]*(0.9+0.2*shade[..., None])*water
     Image.fromarray(np.clip(lit, 0, 255).astype(np.uint8)).save(a.out)
+    if a.layers:
+        stem = a.out.rsplit('.', 1)[0]
+        Image.fromarray(np.clip(colour[..., :3], 0, 255).astype(np.uint8)).save(stem+'-colour.png')
+        Image.fromarray((shade*255).astype(np.uint8)).save(stem+'-shade.png')
     print(a.out, lit.shape)
 
 

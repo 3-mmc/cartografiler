@@ -35,6 +35,7 @@ from scipy.spatial import cKDTree
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
+LAYOUT_VERSION = 8          # bump when the layout changes shape, so cached territories are redone
 
 # ---------------------------------------------------------------- hashing & noise
 
@@ -92,6 +93,12 @@ def fbm(x, y, freq: float, octaves: int, seed, gain: float = 0.5):
     return total/norm
 
 
+def _bspline(t):
+    t2 = t*t
+    t3 = t2*t
+    return ((1-t)**3/6, (3*t3-6*t2+4)/6, (-3*t3+3*t2+3*t+1)/6, t3/6)
+
+
 class GridNoise:
     """Noise on a regular pixel grid, identical to value_noise/fbm at the same world points
     but far cheaper: only the lattice points the grid spans are hashed, then gathered."""
@@ -123,15 +130,56 @@ class GridNoise:
         L = lattice(I, J, seed)
         cx = ix-i0
         cy = iy-j0
-        a = L[np.ix_(cy, cx)]
-        b = L[np.ix_(cy, cx+1)]
-        c = L[np.ix_(cy+1, cx)]
-        d = L[np.ix_(cy+1, cx+1)]
-        top = a+(b-a)*fx[None, :]
-        bottom = c+(d-c)*fx[None, :]
-        out = (top+(bottom-top)*fy[:, None]).ravel()
+        # Separable: interpolate lattice rows along x, then those rows along y.
+        A = L[:, cx]*(1-fx)[None, :]+L[:, cx+1]*fx[None, :]
+        out = (A[cy, :]*(1-fy)[:, None]+A[cy+1, :]*fy[:, None]).ravel()
         self.memo[key] = out
         return out
+
+    def smooth(self, freq: float, seed: int):
+        """Cubic B-spline value noise (C2), for terms that are lit or sharpened: bilinear value
+        noise shows its square lattice there. Separable on the grid, with a per-seed lattice
+        offset so octaves never share lattice lines. Statistics match value(): mean 0.5."""
+        freq = min(freq, 0.5/self.px)
+        key = ('s', freq, seed)
+        hit = self.memo.get(key)
+        if hit is not None:
+            return hit
+        shift = ((seed*0.6180339887) % 1.0, (seed*0.7548776662) % 1.0)
+        X = self.gx*freq+shift[0]
+        Y = self.gy*freq+shift[1]
+        ix = np.floor(X).astype(np.int64)
+        iy = np.floor(Y).astype(np.int64)
+        tx = X-ix
+        ty = Y-iy
+        i0, j0 = int(ix.min())-1, int(iy.min())-1
+        I, J = np.meshgrid(np.arange(i0, int(ix.max())+3), np.arange(j0, int(iy.max())+3))
+        L = lattice(I, J, seed+77777)
+        wx = _bspline(tx)
+        wy = _bspline(ty)
+        cx = ix-i0
+        cy = iy-j0
+        A = sum(L[:, cx+(o-1)]*wx[o][None, :] for o in range(4))          # (lattice rows, n)
+        out = sum(A[cy+(o-1), :]*wy[o][:, None] for o in range(4))          # (n, n)
+        out = (0.5+(out.ravel()-0.5)*1.33)
+        self.memo[key] = out
+        return out
+
+    def smooth_fbm(self, freq: float, octaves: int, seed: int, gain: float = 0.5):
+        key = ('sf', freq, octaves, seed, gain)
+        hit = self.memo.get(key)
+        if hit is not None:
+            return hit
+        total = np.zeros(self.gx.size*self.gy.size)
+        amp = 1.0
+        norm = 0.0
+        for o in range(max(1, octaves)):
+            total += (self.smooth(freq*(2.03**o), seed+o*1013)*2-1)*amp
+            norm += amp
+            amp *= gain
+        total /= norm
+        self.memo[key] = total
+        return total
 
     def fbm(self, freq: float, octaves: int, seed: int, gain: float = 0.5):
         key = ('f', freq, octaves, seed, gain)
@@ -177,6 +225,10 @@ class Territory:
     version: int
     child_by_label: dict = field(default_factory=dict)
     sea_dist: np.ndarray | None = None
+    mouth: tuple | None = None       # where this territory's trunk meets the sea (a delta)
+    river_dist: np.ndarray | None = None   # raster distance to the nearest river (cells)
+    falls: bool = False              # its river falls at the outlet (ground changes)
+    lakes: list = field(default_factory=list)
 
     @property
     def cell(self) -> float:
@@ -273,7 +325,23 @@ def sea_distance(t: Territory, xs, ys):
         return np.full(np.shape(xs), 1e300)
     u = (xs-t.x0)/t.size*t.n-0.5
     v = (ys-t.y0)/t.size*t.n-0.5
-    return _bilinear(t.sea_dist, u, v, t.n)*t.cell
+    # B-spline, not bilinear: relief is built on this, and bilinear facets show in the light.
+    return _bspline_sample(t.sea_dist, u, v, t.n)*t.cell
+
+
+def _bspline_sample(grid, u, v, n):
+    i = np.floor(u).astype(np.int64)
+    j = np.floor(v).astype(np.int64)
+    wu = _bspline(u-i)
+    wv = _bspline(v-j)
+    out = np.zeros(np.shape(u))
+    for a in range(4):
+        jj = np.clip(j+a-1, 0, n-1)
+        row = np.zeros(np.shape(u))
+        for b in range(4):
+            row += grid[jj, np.clip(i+b-1, 0, n-1)]*wu[b]
+        out += row*wv[a]
+    return out
 
 
 def _bilinear(grid, u, v, n):
@@ -350,6 +418,70 @@ def _meander(a, b, seed, amount=0.18, points=14):
     swing = (np.sin(t*math.pi*2.3+phase[0])*0.6 + np.sin(t*math.pi*5.1+phase[1])*0.3 + np.sin(t*math.pi*9.7+phase[2])*0.12)
     swing *= np.sin(t*math.pi)*amount*length
     return a[None, :] + t[:, None]*d[None, :] + swing[:, None]*normal[None, :]
+
+
+def _chaikin(pts, ws, iterations=2):
+    """Corner-cutting: raster paths become smooth curves; endpoints stay put."""
+    for _ in range(iterations):
+        if len(pts) < 3:
+            break
+        q = 0.75*pts[:-1]+0.25*pts[1:]
+        r = 0.25*pts[:-1]+0.75*pts[1:]
+        qw = 0.75*ws[:-1]+0.25*ws[1:]
+        rw = 0.25*ws[:-1]+0.75*ws[1:]
+        mid = np.empty((2*len(q), 2))
+        mid[0::2] = q
+        mid[1::2] = r
+        midw = np.empty(2*len(q))
+        midw[0::2] = qw
+        midw[1::2] = rw
+        pts = np.vstack([pts[:1], mid[1:-1], pts[-1:]])
+        ws = np.concatenate([ws[:1], midw[1:-1], ws[-1:]])
+    return pts, ws
+
+
+def _follow_borders(t, pts, ws):
+    """Resample a raster-routed river and bend it with the same domain warp label_at applies,
+    so it follows the rendered (fractal) borders instead of the raster's straight edges."""
+    step = t.cell/3
+    seg = np.hypot(*np.diff(pts, axis=0).T)
+    at = np.concatenate([[0], np.cumsum(seg)])
+    if at[-1] <= 0:
+        return pts, ws
+    s = np.linspace(0, at[-1], max(2, int(at[-1]/step)+1))
+    x = np.interp(s, at, pts[:, 0])
+    y = np.interp(s, at, pts[:, 1])
+    w = np.interp(s, at, ws)
+    ox, oy = warp_offsets(x, y, t.cell*16, warp_amplitude(t), t.cell/6)
+    # Endpoints stay put: they are where tributaries join and where the water leaves.
+    taper = np.minimum(1.0, np.minimum(s, at[-1]-s)/(t.cell*2))
+    return np.column_stack([x-ox*taper, y-oy*taper]), w
+
+
+def _grid_graph(allowed, cost):
+    """8-connected graph over allowed raster cells; edge weight is length times mean cost."""
+    from scipy.sparse import coo_matrix
+    n = allowed.shape[0]
+    ids = np.full(allowed.size, -1, dtype=np.int64)
+    flat = np.flatnonzero(allowed.ravel())
+    ids[flat] = np.arange(len(flat))
+    c = cost.ravel()
+    rows, cols, vals = [], [], []
+    for di, dj, length in ((0, 1, 1.0), (1, 0, 1.0), (1, 1, 1.4142), (1, -1, 1.4142)):
+        a = flat
+        ai, aj = a // n, a % n
+        bi, bj = ai+di, aj+dj
+        good = (bi >= 0) & (bi < n) & (bj >= 0) & (bj < n)
+        a, b = a[good], (bi*n+bj)[good]
+        good = allowed.ravel()[b]
+        a, b = a[good], b[good]
+        w = length*(c[a]+c[b])/2
+        rows += [ids[a], ids[b]]
+        cols += [ids[b], ids[a]]
+        vals += [w, w]
+    m = len(flat)
+    graph = coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(m, m)).tocsr() if rows else coo_matrix((m, m)).tocsr()
+    return graph, ids
 
 
 def weight_of(files, dirs, scanned=True):
@@ -583,7 +715,7 @@ class World:
         dirs = [(r['id'], round(math.log(weight_of(r['files'], r['dirs'], bool(r['scanned']))), 2)) for r in rows if r['is_dir'] and not r['link']]
         files = len(rows)-len(dirs)
         frame = (parent.sig, entry['label']) if parent is not None else ('root',)
-        return hashlib.blake2b(repr((frame, dirs, files, bool(node['scanned']))).encode(), digest_size=12).hexdigest()
+        return hashlib.blake2b(repr((LAYOUT_VERSION, frame, dirs, files, bool(node['scanned']))).encode(), digest_size=12).hexdigest()
 
     # ---------------------------------------------------------------- layout
 
@@ -632,7 +764,8 @@ class World:
         seeds = []
         weights = []
         if outlet is not None and not continental:
-            home_seed = centre+(ou-centre)*0.55
+            # The home district is the valley floor: downstream, next to where the river leaves.
+            home_seed = centre+(ou-centre)*0.8
         else:
             home_seed = centre
         home_seed = cells[np.argmin(((cells-home_seed)**2).sum(axis=1))]
@@ -704,6 +837,39 @@ class World:
                 labels[~mask] = SEA   # open ocean all the way to the edge of the world
         border = ndimage.distance_transform_edt(~_boundary(labels)).astype(np.float32)
 
+        # Drainage: one least-cost tree from where the water leaves (the outlet, or for the
+        # world the home continent's coast) over the land. Travel along borders between
+        # provinces and through the home district is cheap, across a province's interior
+        # dear, so rivers run in the valleys between places and merge as they go.
+        land = (labels != SEA) & (labels != OUT)
+        network = land.copy()
+        if continental:
+            network = np.zeros((n, n), dtype=bool)
+            network.ravel()[flat] = member_group[owner] == 0
+            network &= land
+        mouth = None
+        sink = None
+        if continental:
+            cand = np.flatnonzero((ndimage.binary_dilation(labels == SEA) & network).ravel())
+            hc = np.flatnonzero(labels.ravel() == HOME)
+            if len(cand) and len(hc):
+                hu, hv = (hc % n).mean()+0.5, (hc // n).mean()+0.5
+                sink = int(cand[np.argmin((cand % n+0.5-hu)**2+(cand // n+0.5-hv)**2)])
+                mouth = ((sink % n+0.5)*cell+x0, (sink // n+0.5)*cell+y0)
+        elif network.any():
+            cand = np.flatnonzero(network.ravel())
+            target = ou if outlet is not None else home_seed
+            sink = int(cand[np.argmin((cand % n+0.5-target[0])**2+(cand // n+0.5-target[1])**2)])
+        drain = None
+        if sink is not None:
+            from scipy.sparse.csgraph import dijkstra
+            wander = fbm(gx, gy, 6.0/size, 3, stable_hash(path+'valleys') & 0xFFFF)
+            valley = _boundary(labels) | (labels == HOME)
+            cost = np.where(valley, 1.0, 7.0)*(1.0+0.45*(wander+1.0))
+            graph, ids = _grid_graph(network, cost)
+            dist, pred = dijkstra(graph, indices=ids[sink], return_predecessors=True)
+            drain = {'cells': np.flatnonzero(network.ravel()), 'ids': ids, 'pred': pred, 'dist': dist, 'sink': sink}
+
         # Per-child geometry.
         ys_idx, xs_idx = np.indices((n, n))
         flat_labels = labels.ravel()
@@ -719,8 +885,8 @@ class World:
         else:
             capital = (home_seed[0]*cell+x0, home_seed[1]*cell+y0)
         cap_u = np.array([(capital[0]-x0)/cell, (capital[1]-y0)/cell])
-        near_home = ndimage.binary_dilation(labels == HOME, iterations=1)
         near_sea = ndimage.binary_dilation(labels == SEA, iterations=1)
+        edge_cells = _boundary(labels)
         children = []
         for i, r in enumerate(subdirs):
             lab = FIRST_CHILD+i
@@ -732,11 +898,18 @@ class World:
             centroid = ((sx[lab]/c)*cell+x0, (sy[lab]/c)*cell+y0)
             # Drains to the capital when it shares land with it; a separate continent drains to the sea.
             same_land = member_group[i+1] == member_group[0]
-            near_down = near_home if (same_land or not continental) else near_sea
-            touching = members[near_down.ravel()[members]]
-            pool = touching if len(touching) else members
-            pu, pv = pool % n+0.5, pool // n+0.5
-            pick = int(np.argmin((pu-cap_u[0])**2+(pv-cap_u[1])**2))
+            if drain is not None and (same_land or not continental):
+                # Leaves where the drainage is nearest: a border cell on the way to the outlet.
+                on_edge = members[edge_cells.ravel()[members]]
+                pool = on_edge if len(on_edge) else members
+                reach = drain['dist'][drain['ids'][pool]]
+                pick = int(np.argmin(np.where(np.isfinite(reach), reach, np.inf)))
+                pu, pv = pool % n+0.5, pool // n+0.5
+            else:
+                touching = members[near_sea.ravel()[members]]
+                pool = touching if len(touching) else members
+                pu, pv = pool % n+0.5, pool // n+0.5
+                pick = int(np.argmin((pu-cap_u[0])**2+(pv-cap_u[1])**2))
             child_outlet = (pu[pick]*cell+x0, pv[pick]*cell+y0)
             children.append({'id': r['id'], 'path': r['path'], 'name': self.display_name(r['path'], r['name']), 'label': lab,
                              'same_land': bool(same_land or not continental), 'scanned': bool(r['scanned']),
@@ -755,8 +928,9 @@ class World:
             # Distance to the coastline from either side: beaches on land, depth at sea.
             land = (labels != SEA) & (labels != OUT)
             t.sea_dist = (ndimage.distance_transform_edt(land) + ndimage.distance_transform_edt(~land)).astype(np.float32)
+        t.node = dict(t.node, home_weight=float(weights[0]))
         if overflow:
-            t.node = dict(node, overflow=len(overflow))
+            t.node = dict(t.node, overflow=len(overflow))
         t.node = dict(t.node, side=entry['side'] if entry else size*0.6)
         if parent is None:
             # The Linux disk is a continent without a single directory of its own.
@@ -765,7 +939,15 @@ class World:
                 lc = cells[linux]
                 t.node['continent'] = {'name': 'Linux · WSL', 'centroid': ((lc[:, 0].mean())*cell+x0, (lc[:, 1].mean())*cell+y0),
                                        'side': math.sqrt(linux.sum())*cell}
-        t.rivers = self._rivers(t)
+        if continental:
+            t.mouth = mouth
+        elif entry is not None and not entry.get('same_land', True):
+            t.mouth = outlet
+        if parent is not None:
+            # Waterfalls where a river leaves one kind of ground for another: a different
+            # filesystem, or the edge of what you may write.
+            t.falls = t.mouth is None and (zone, writable) != (parent.zone, parent.writable)
+        t.rivers, t.lakes = self._rivers(t, drain)
         t.places = self._places(t, files, labels, cell)
         return t
 
@@ -781,48 +963,205 @@ class World:
         # One archipelago layer per branch: islands of islands read as cracked tiles.
         return parent is None or not parent.continental
 
-    def _rivers(self, t: Territory) -> list:
-        # Downstream is always toward the parent: tributaries run from each child to this
-        # territory's capital, and the trunk carries everything out to its own outlet.
+    def _rivers(self, t: Territory, drain):
+        """The drainage network, upper courses and deltas.
+
+        Every subfolder's water leaves at its outlet and follows the least-cost tree to this
+        territory's outlet, along the valleys between provinces, so streams meet in shared
+        channels (tributaries and confluences). Widths follow the flow they carry, and the
+        widths match across levels: a place's own trunk ends as wide as its stream begins."""
+        n = t.n
         rivers = []
-        if t.outlet is not None:
-            side = t.node['side']
-            rivers.append({'pts': _meander(t.capital, t.outlet, stable_hash(t.path+'trunk')), 'width': 0.022*side, 'kind': 'trunk', 'child': None})
+        lakes = []
+        cell = t.cell
+        side = t.node['side']
+        if t.path == '/' and t.node.get('continent'):
+            side = t.node['continent']['side']
+        same = [c for c in t.children if c.get('same_land', True)]
+        total = sum(c['weight'] for c in same)+t.node.get('home_weight', 1.0)
+        width_of = lambda flow: 0.02*side*math.sqrt(max(flow, 1e-12)/total)
+        river_cells = np.zeros(n*n, dtype=bool)
+        if drain is not None:
+            cells, ids, pred, sink = drain['cells'], drain['ids'], drain['pred'], drain['sink']
+            down = np.full(n*n, -1, dtype=np.int64)
+            ok = pred >= 0
+            down[cells[ok]] = cells[pred[ok]]
+
+            def cell_of(point):
+                u, v = int((point[0]-t.x0)/cell), int((point[1]-t.y0)/cell)
+                k = min(max(v, 0), n-1)*n+min(max(u, 0), n-1)
+                if ids[k] >= 0:
+                    return k
+                return int(cells[np.argmin((cells % n+0.5-(point[0]-t.x0)/cell)**2+(cells // n+0.5-(point[1]-t.y0)/cell)**2)])
+            sources = [(t.capital, cell_of(t.capital), t.node.get('home_weight', 1.0))]
+            for c in sorted(same, key=lambda c: -c['weight'])[:400]:
+                sources.append((c['outlet'], cell_of(c['outlet']), c['weight']))
+            flow = np.zeros(n*n)
+            for _, start, f in sources:
+                k = start
+                for _ in range(4*n):
+                    flow[k] += f
+                    if k == sink or down[k] < 0:
+                        break
+                    k = down[k]
+            end = t.outlet or t.mouth
+            claimed = np.zeros(n*n, dtype=bool)
+            for point, start, f in sources:
+                pts = [point]
+                ws = [width_of(f)]
+                k = start
+                for _ in range(4*n):
+                    pts.append(((k % n+0.5)*cell+t.x0, (k // n+0.5)*cell+t.y0))
+                    ws.append(width_of(flow[k]))
+                    if claimed[k] or k == sink or down[k] < 0:
+                        break
+                    claimed[k] = True
+                    k = down[k]
+                if k == sink and end is not None and not claimed[sink]:
+                    pts.append(end)
+                    ws.append(width_of(flow[sink]))
+                claimed[k] = True
+                if len(pts) >= 2:
+                    p, w = _chaikin(np.array(pts), np.maximum.accumulate(np.array(ws)), 2)
+                    p, w = _follow_borders(t, p, w)
+                    rivers.append({'pts': p, 'w': w, 'kind': 'stream', 'child': None})
+            river_cells = claimed & (flow >= total*0.02)
+            if len(t.children) >= 6:
+                # Where many streams meet, they pool: a lake at the capital of a hub.
+                lakes.append({'x': t.capital[0], 'y': t.capital[1],
+                              'r': 0.012*side*min(1.0, math.sqrt(len(t.children)/40)), 'seed': stable_hash(t.path+'lake')})
+        # Ridges part where rivers run: distance to the main channels, in cells.
+        t.river_dist = ndimage.distance_transform_edt(~river_cells.reshape(n, n)).astype(np.float32) if river_cells.any() else None
         for c in t.children:
-            width = 0.022*c['side']
-            upper = _meander(c['centroid'], c['outlet'], stable_hash(c['path']+'upper'))
-            rivers.append({'pts': upper, 'width': width*0.8, 'kind': 'upper', 'child': c['label']})
-            if c.get('same_land', True):
-                rivers.append({'pts': _meander(c['outlet'], t.capital, stable_hash(c['path']+'lower'), 0.12), 'width': width, 'kind': 'lower', 'child': None})
+            # Each subfolder's own course, drawn until that place shows its own network.
+            wc = 0.02*c['side']
+            pts = _meander(c['centroid'], c['outlet'], stable_hash(c['path']+'upper'), 0.16, 10)
+            rivers.append({'pts': pts, 'w': np.linspace(wc*0.3, wc, len(pts)), 'kind': 'upper', 'child': c['label']})
+        if t.continental:
+            deltas = [(c['outlet'], c['centroid'], 0.02*c['side'], c['path']) for c in t.children if not c.get('same_land', True)]
+            if t.mouth is not None:
+                deltas.append((t.mouth, t.capital, width_of(total), t.path))
+            for apex, inland, w, key in deltas:
+                d = np.array(apex)-np.array(inland)
+                d /= max(float(np.hypot(*d)), 1e-300)
+                L = 8*w
+                h = stable_hash(key+'delta')
+                fan = []
+                for j, a in enumerate(np.linspace(-0.9, 0.9, 5)):
+                    a += ((h >> (4*j)) % 100)/100*0.3-0.15
+                    tip = np.array(apex)+L*(0.7+0.4*((h >> (3*j+1)) % 100)/100)*np.array([d[0]*math.cos(a)-d[1]*math.sin(a), d[0]*math.sin(a)+d[1]*math.cos(a)])
+                    pts = _meander(apex, tip, h+j, 0.12, 8)
+                    rivers.append({'pts': pts, 'w': np.linspace(w*0.55, w*0.25, len(pts)), 'kind': 'delta', 'child': None})
+                    fan.append(tip)
+                lakes.append({'x': apex[0], 'y': apex[1], 'r': L, 'seed': h, 'delta': (float(d[0]), float(d[1]))})
         for r in rivers:
             p = r['pts']
-            r['bbox'] = (p[:, 0].min()-r['width'], p[:, 1].min()-r['width'], p[:, 0].max()+r['width'], p[:, 1].max()+r['width'])
-        return rivers
+            wmax = float(np.max(r['w']))
+            r['width'] = wmax
+            r['bbox'] = (p[:, 0].min()-wmax, p[:, 1].min()-wmax, p[:, 0].max()+wmax, p[:, 1].max()+wmax)
+        return rivers, lakes
 
     def _places(self, t: Territory, files, labels, cell) -> dict:
-        """Landmarks for the directory's own files, spread through its home district."""
+        """Files as fields: each kind forms one cohesive patch of the home district, and each
+        file is a parcel of its patch (a field, a city block, a peak of a massif).
+
+        A kind's patch sits on the side facing the subfolder that holds most of that kind, so
+        a folder's photographs grow into the same forest as its photo-filled subfolder. Within
+        a patch the parcels are relaxed to even sizes and run alphabetically across it."""
         if not files:
             return {'n': 0}
+        n = t.n
         home = np.flatnonzero(labels.ravel() == HOME)
         if len(home) == 0:
             home = np.flatnonzero(labels.ravel() > SEA)
-        n = t.n
-        order = np.argsort([stable_hash(f"{t.path}#{i}") % 1000003 for i in range(len(home))], kind='stable')
-        home = home[order]
-        files = sorted(files, key=lambda r: r['name'].casefold())
         count = len(files)
-        slots = home[(np.arange(count)*len(home))//count]
-        jitter = np.array([[(stable_hash(r['path']) % 1000)/1000-0.5, ((stable_hash(r['path']) >> 12) % 1000)/1000-0.5] for r in files])
-        per_cell = max(1.0, count/len(home))
-        xs = (slots % n+0.5+jitter[:, 0]*0.8)*cell+t.x0
-        ys = (slots // n+0.5+jitter[:, 1]*0.8)*cell+t.y0
-        base = 0.42*math.sqrt(len(home)*cell*cell/count) if count else cell
+        # Sub-cells of the home district: enough for several per file, within a budget.
+        f = int(np.clip(math.ceil(math.sqrt(min(max(8*count, 400), 40000)/len(home))), 1, 24))
+        sub = (np.arange(f)+0.5)/f-0.5
+        ox, oy = np.meshgrid(sub, sub)
+        pts = np.column_stack([((home % n)[:, None]+0.5+ox.ravel()[None, :]).ravel(),
+                               ((home // n)[:, None]+0.5+oy.ravel()[None, :]).ravel()])*cell
+        pts[:, 0] += t.x0
+        pts[:, 1] += t.y0
+        # Only where the home district is actually drawn: borders are warped, so raster cells
+        # at the edge may belong to a neighbour on the map.
+        lab, gap = label_at(t, pts[:, 0], pts[:, 1], cell/f)
+        inside = lab == HOME
+        # Heights fade out toward borders (so no cliffs): keep parcel centres off that band.
+        interior = inside & (gap > 0.6*cell)
+        if interior.sum() >= max(4, len(files)):
+            pts = pts[interior]
+        elif inside.sum() >= max(4, len(files)):
+            pts = pts[inside]
+        sub_area = (cell/f)**2
+        files = sorted(files, key=lambda r: r['name'].casefold())
+        kinds = [r['kind'] or 'other' for r in files]
+        groups = {}
+        for i, kd in enumerate(kinds):
+            groups.setdefault(kd, []).append(i)
+        names = sorted(groups)
         sizes = np.array([r['size'] or 0 for r in files], dtype=np.float64)
-        radius = base*(0.55+0.45*np.clip(np.log10(sizes+1)/9, 0, 1))
+        # Patch seeds: toward the child richest in that kind, else a stable spot.
+        seeds = []
+        for kd in names:
+            best = max(t.children, key=lambda c: (c['kinds'] or {}).get(kd, 0), default=None)
+            if best is not None and (best['kinds'] or {}).get(kd, 0) > 0:
+                target = np.array(best['centroid'])
+            else:
+                target = pts[stable_hash(t.path+kd) % len(pts)]
+            seeds.append(pts[np.argmin(((pts-target)**2).sum(axis=1))]+(np.array([stable_hash(kd) % 97, stable_hash(kd) % 89])/1e3-0.045)*cell)
+        seeds = np.array(seeds)
+        weights = np.array([len(groups[kd]) for kd in names], dtype=np.float64)
+        span = math.sqrt(len(pts)*sub_area)
+        wx = fbm(pts[:, 0], pts[:, 1], 3.0/span, 3, stable_hash(t.path+'patch') & 0xFFFF)*span*0.08
+        wy = fbm(pts[:, 0], pts[:, 1], 3.0/span, 3, (stable_hash(t.path+'patch') >> 16) & 0xFFFF)*span*0.08
+        patch_of = _power_diagram(pts+np.column_stack([wx, wy]), seeds, weights) if len(names) > 1 else np.zeros(len(pts), dtype=np.int64)
+        X = np.zeros(count)
+        Y = np.zeros(count)
+        R = np.zeros(count)
+        RF = np.zeros(count)
+        patch = np.zeros(count, dtype=np.int64)
+        patches = []
+        for pi, kd in enumerate(names):
+            members = groups[kd]
+            region = pts[patch_of == pi]
+            if len(region) == 0:
+                region = seeds[pi:pi+1]
+            m = len(members)
+            h = stable_hash(t.path+kd+'sites')
+            if m*2 <= len(region):
+                # Evenly spread parcels: a few Lloyd steps over the patch's sub-cells.
+                order = np.argsort((np.arange(len(region), dtype=np.int64)*2654435761+(h % 4294967291)) % 4294967291)
+                sites = region[order[(np.arange(m)*len(region))//m]].copy()
+                if m > 1:
+                    for _ in range(4):
+                        _, own = cKDTree(sites).query(region, workers=1)
+                        cnt = np.bincount(own, minlength=m)
+                        has = cnt > 0
+                        sites[has, 0] = np.bincount(own, weights=region[:, 0], minlength=m)[has]/cnt[has]
+                        sites[has, 1] = np.bincount(own, weights=region[:, 1], minlength=m)[has]/cnt[has]
+            else:
+                pick = (np.arange(m)*len(region))//m
+                jit = np.array([[((h+i*7919) % 1000)/1000-0.5, ((h+i*104729) % 1000)/1000-0.5] for i in range(m)])
+                sites = region[pick]+jit*(cell/f)
+            # Alphabetical sweep across the patch, in a direction of its own.
+            a = (h % 628)/100
+            order = np.argsort(sites[:, 0]*math.cos(a)+sites[:, 1]*math.sin(a), kind='stable')
+            sites = sites[order]
+            X[members] = sites[:, 0]
+            Y[members] = sites[:, 1]
+            area = max(len(region), 1)*sub_area
+            R[members] = math.sqrt(area/m/math.pi)
+            # Landmarks (peaks, mesas, calderas) keep to the size they would have among eight
+            # neighbours: in a sparse folder a file owns a wide parcel, not a giant mountain.
+            RF[members] = min(R[members[0]], math.sqrt(len(pts)*sub_area/(8*math.pi)))
+            patch[members] = pi
+            patches.append({'kind': kd, 'n': m, 'x': float(region[:, 0].mean()), 'y': float(region[:, 1].mean()),
+                            'side': math.sqrt(area), 'bytes': float(sizes[members].sum())})
         return {'n': count, 'ids': [r['id'] for r in files], 'names': [r['name'] for r in files], 'paths': [r['path'] for r in files],
-                'kinds': [r['kind'] for r in files], 'x': xs, 'y': ys, 'r': radius, 'size': sizes,
+                'kinds': kinds, 'x': X, 'y': Y, 'r': R, 'rf': RF, 'size': sizes, 'patch': patch, 'patches': patches,
                 'mtime': np.array([r['mtime'] or 0 for r in files]), 'attrs': np.array([r['attrs'] or 0 for r in files]),
-                'link': [bool(r['link']) for r in files], 'is_dir': [bool(r['is_dir']) for r in files], 'per_cell': per_cell}
+                'link': [bool(r['link']) for r in files], 'is_dir': [bool(r['is_dir']) for r in files]}
 
     # ---------------------------------------------------------------- queries
 

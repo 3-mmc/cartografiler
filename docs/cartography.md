@@ -65,20 +65,37 @@ land borders along ridgelines, and nothing below the continents is split by wate
 
 ## Hydrology: structure is drainage
 
-Water always runs **downhill toward the parent folder**. Each territory is a basin: its
-home district is the valley floor, its subfolders rise slightly above it, and divides run
-along their borders but come and go. Rivers carry every place to its parent's capital
-and on toward the sea. Rivers widen with the size of what they carry, and each is clipped
-to its own ground, so a distant ancestor's river never cuts through the place you are
-looking at.
+Water always runs **downhill toward the parent folder**. Each territory drains to one outlet
+(for a disk, its coast). A least-cost tree is grown from there over the land: travel along
+the borders between provinces and through the home district is cheap, across a province's
+interior dear. So rivers run **in the valleys between places**, the way Civilization V runs
+its rivers along tile edges, not through tiles, and ridgelines part where they pass.
+
+- **Tributaries and confluences.** Every subfolder's water leaves at its outlet (the point
+  of its border nearest the drainage) and follows the tree, so streams from neighbouring
+  folders meet and carry on as one.
+- **Width is flow.** A stream is as wide as the share of the territory it drains
+  (width ∝ √flow). A place's own trunk ends as wide as the parent's stream begins, so rivers
+  are continuous from a leaf folder to the sea. On screen, rivers are drawn at true width
+  until 6 px, then grow sublinearly as you zoom (like a map symbol): a great river stays a
+  river when you zoom into a town on its bank.
+- **Lakes** pool at the capital of a hub, a folder with six or more subfolders, where many
+  streams meet.
+- **Waterfalls** mark where a river crosses onto other ground: a different filesystem, or
+  the edge of what you may write (the river falls from your home into `/home`).
+- **Deltas.** Each disk's great river reaches the sea through a lobed fan of marsh and sand,
+  threaded by distributaries, with a turbid plume offshore.
 
 ## Land cover and landforms: what is here
 
-From orbit, land cover is a blend of what a place holds, weighted by each kind's share:
+From orbit, land cover is a patchwork of what a place holds, each kind winning ground in
+proportion to its share. Cover patches use world-absolute noise per cover, so a forest on
+one side of a border carries on across it when the neighbour grows forest too:
 
 | Content | Cover |
 |---|---|
-| Images, video | Forest |
+| Images | Forest |
+| Video | Canyon country |
 | Tables | Fields |
 | Source code, databases | Towns |
 | PDFs, documents | Meadow |
@@ -87,12 +104,39 @@ From orbit, land cover is a blend of what a place holds, weighted by each kind's
 | Executables, disk images | Bare rock |
 | Anything else | Scrub |
 
-Up close, each file stands as a landmark in its home district: PDFs as **mountains** (rock
-by age), images as **woods**, audio as **lakes**, video as a lake below a **falls**, tables
-as **fields**, code and databases as **settlements**, archives as **glaciers**,
-executables as **obsidian** shards, disk images as **calderas**, documents as flowering
-**meadow**, and anything else as a **cairn**. Landmark size follows file size
-(logarithmically).
+### Fields: a folder's own files
+
+A folder's own files lie in its home district **as fields**, the way Civilization V fills
+a farm tile with a patchwork of crops and a forest tile with one canopy that runs into the
+next. Each **kind forms one patch**; each **file is one parcel** of its patch.
+
+- **Cohesion.** A patch sits on the side facing the subfolder that holds most of that kind,
+  so a folder's photographs grow into the same forest as its photo-filled subfolder.
+- **Order.** Parcels are relaxed to even sizes and run **alphabetically** across the patch.
+- **Level of detail.** Far away a patch is a single cover. Closer, it divides into parcels,
+  and closer still each parcel shows its own form. Labels follow: a patch is named as a
+  whole ("140 images") until its parcels are large, then a handful of its largest files are
+  named.
+
+| Kind | Patch | Parcel |
+|---|---|---|
+| PDF | a massif | a peak; rock by age, snow when dormant |
+| Images | a forest | a stand of its own tone, crowns up close |
+| Video | canyon country | a mesa of banded strata: film is banded in frames; a large file is a broad, tall mesa, a small one a butte |
+| Audio | wetland | a reed bed with standing pools |
+| Tables | a field system | a field of one crop, furrows in its own direction, hedgerows between |
+| Source code | a town | a city block with streets between and roofs up close |
+| Databases | a town | the same, with slate-blue roofs |
+| Archives | a glacier | a tongue of ice, crevassed at its edges |
+| Executables | obsidian | a dark volcanic flow |
+| Disk images | calderas | a crater with its lake |
+| Documents | meadow | meadow in flower, dry-stone walls between |
+| Anything else | scrub | scrub with a cairn |
+
+Landmarks (peaks, mesas, calderas) keep to the size they would have among eight
+neighbours, so a file in a sparse folder owns a wide parcel, not a giant mountain. Video is
+no longer water: water is structure (drainage), and a landform that means "content" must not
+borrow it.
 
 ## Geology: age
 
@@ -116,19 +160,28 @@ return as the continuous map matures. The design is unchanged, only the drawing 
 pending:
 
 - **Page counts as mountain height.** PDF and DOCX page counts, image dimensions,
-  audio and video durations, and table sizes from per-file metadata. Landmarks currently
+  audio and video durations, and table sizes from per-file metadata. Parcels currently
   use kind, size and age only; metadata extraction runs per file and needs a background
   pass of its own.
-- **Tides**: cloud-only files as phantom islands, pinned files behind dikes, downloaded
-  ones on tidal flats, lighthouses at sync roots. The survey already records the Windows
-  attribute bits this needs.
-- **Sea level** from disk usage, rising to flood a continent's coasts as its disk fills.
+- **Tides** (on hold): cloud-only files as phantom islands, pinned files behind dikes,
+  downloaded ones on tidal flats, lighthouses at sync roots. The survey already records the
+  Windows attribute bits this needs.
+- **Sea level** (on hold) from disk usage, rising to flood a continent's coasts as its disk fills.
 - **Roads** worn by your own visits (still recorded in `visits.json`), and **walled towns**
   for git repositories.
 - **Time slider**: replaying last-modification times.
-- **Geysers** for files changed in the last 15 minutes, **arches** for symlinks,
-  **canyons** for deeply branching folders, and **mesas, buttes and hoodoos** for
-  sandstone-age documents.
+- **Geysers** for files changed in the last 15 minutes, **arches** for symlinks, and
+  **canyons** for deeply branching folders.
+
+## Materials
+
+Ground detail comes from CC0 aerial and ground textures (Poly Haven; see
+`native/textures/LICENSE.md`), baked by `tools/fetch_textures.py` into normal and
+luminance-detail maps. They never set colour: the synthesised colour carries meaning, the
+texture only grain and relief. Each tile carries per-pixel weights for eight materials
+(meadow, forest, field, town, wet, snow, rock, sand), and the shader samples each at two
+world-anchored scales an octave apart, cross-faded with zoom, so the grain looks the same
+at every height.
 
 ---
 
