@@ -5,14 +5,17 @@ import json
 import multiprocessing as mp
 import os
 import secrets
+import shutil
 import subprocess
 import threading
+import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .atlas import biome, directory_facts, metadata
+from .atlas import biome, directory_facts, git_facts, metadata
+from . import cloud, visits
 from .model import Operations, size
 from .preview import preview
 
@@ -76,6 +79,7 @@ class Service(ThreadingHTTPServer):
         self.mutation_lock = threading.Lock()
         self.extract_slots = threading.Semaphore(3)
         self.cache = {}
+        self.visits = Path(os.environ.get('XDG_DATA_HOME',Path.home()/'.local/share'))/'branch/visits.json'
 
 
 FS_CLIMATE = {'9p':'windows','drvfs':'windows','v9fs':'windows','cifs':'network','smb3':'network','nfs':'network',
@@ -97,13 +101,19 @@ def filesystem(path):
                     best = (mount,parts[2])
     except OSError:
         pass
-    return {'mount':best[0],'type':best[1],'zone':FS_CLIMATE.get(best[1],'native'),'writable':os.access(path,os.W_OK)}
+    facts = {'mount':best[0],'type':best[1],'zone':FS_CLIMATE.get(best[1],'native'),'writable':os.access(path,os.W_OK)}
+    try:
+        usage = shutil.disk_usage(path)
+        # Sea level: a filling disk floods its coastline.
+        facts.update(total=usage.total,free=usage.free,used=round(1-usage.free/usage.total,4) if usage.total else None)
+    except OSError:
+        pass
+    return facts
 
 
-def survey(paths, budget=2.5):
+def survey(paths, budget=3.0):
     """Shallow facts for a region's subdirectories, within a time budget. Directories not
     reached in time are simply absent: the map shows them as unsurveyed, not as empty."""
-    import time
     deadline = time.monotonic()+budget
     facts = {}
     for raw in paths[:200]:
@@ -112,6 +122,8 @@ def survey(paths, budget=2.5):
         path = Path(os.path.abspath(str(raw)))
         if path.is_dir():
             facts[str(path)] = directory_facts(path)
+            if facts[str(path)].get('git') and time.monotonic()<deadline:
+                facts[str(path)].update(git_facts(path))
     return facts
 
 
@@ -219,12 +231,25 @@ class Handler(BaseHTTPRequestHandler):
                 entries.sort(key=lambda e:(not e['directory'],e['name'].casefold()))
                 # One map page is bounded; all names remain searchable via the filter.
                 page = max(0,int(query.get('page',['0'])[0]))
-                page_size = 120
+                page_size = max(1,min(1000,int(query.get('page_size',['120'])[0])))
                 if focus:
                     match = next((i for i,e in enumerate(entries) if e['path']==focus),None)
                     if match is not None: page = match//page_size
                 page = min(page,max(0,(len(entries)-1)//page_size))
-                return self.reply(200,{'path':str(path),'parent':str(path.parent),'filesystem':filesystem(path),'entries':entries[page*page_size:(page+1)*page_size],
+                shown = entries[page*page_size:(page+1)*page_size]
+                extra = {'visits':visits.counts(self.server.visits,[e['path'] for e in shown])}
+                if query.get('cloud',['true'])[0]=='true':
+                    tides = cloud.directory_tides(path)
+                    if tides:
+                        for e in shown:
+                            e['tide'] = tides['entries'].get(e['name'])
+                        extra['cloud'] = {'provider':tides['provider'],'root':tides['root']}
+                    roots = {root for root,_ in cloud.sync_roots()}
+                    for e in shown:
+                        if e['path'] in roots: e['sync_root'] = True
+                if (path/'.git').exists():
+                    extra['git'] = git_facts(path)
+                return self.reply(200,{**extra,'path':str(path),'parent':str(path.parent),'filesystem':filesystem(path),'entries':shown,
                                        'total':len(entries),'page':page,'pages':max(1,(len(entries)+page_size-1)//page_size)})
             if url.path=='/metadata' and path.is_dir():
                 # A shallow scandir; no file contents are read, so no worker process.
@@ -256,6 +281,9 @@ class Handler(BaseHTTPRequestHandler):
             source = Path(body.get('source',self.server.start)).absolute()
             if self.path=='/command':
                 return self.reply(200,bash_destinations(body.get('command',''),source))
+            if self.path=='/visit':
+                visits.record(self.server.visits,str(source))
+                return self.reply(200,{'ok':True})
             if self.path=='/survey':
                 return self.reply(200,{'facts':survey(body.get('paths',[]))})
             with self.server.mutation_lock:
@@ -306,8 +334,13 @@ def launch():
     parser.add_argument('--headless',action='store_true')
     parser.add_argument('--focus',default='',help='smoke/capture only: zoom to this entry name')
     parser.add_argument('--legend',action='store_true',help='smoke/capture only: open the legend')
+    parser.add_argument('--enter',default='',help='smoke/capture only: enter this subfolder first')
+    parser.add_argument('--time',action='store_true',help='smoke/capture only: open the time slider mid-history')
     args = parser.parse_args()
     path = Path(args.path).expanduser().absolute()
+    if args.path=='demo':
+        from .demo import create_demo
+        path = create_demo(Path(__file__).resolve().parent.parent/'demo')
     if not path.is_dir():
         parser.error('Starting path must be a directory.')
     base = Path(__file__).resolve().parent.parent
@@ -330,9 +363,31 @@ def launch():
         cmd += ['--focus',args.focus]
     if args.legend:
         cmd.append('--legend')
+    if args.enter:
+        cmd += ['--enter',args.enter]
+    if args.time:
+        cmd.append('--time')
+    import signal
+    godot = subprocess.Popen(cmd,env=env)
+    def stop(*_):
+        # Never leave an orphaned window behind: WSLg keeps dead windows on screen.
+        if godot.poll() is None:
+            godot.terminate()
+            try: godot.wait(timeout=5)
+            except subprocess.TimeoutExpired: godot.kill()
+        raise SystemExit(130)
+    signal.signal(signal.SIGTERM,stop)
+    signal.signal(signal.SIGINT,stop)
     try:
-        return subprocess.call(cmd,env=env)
+        # A script parse error means the in-game smoke timer never starts; watch from here.
+        return godot.wait(timeout=150 if args.smoke else None)
+    except subprocess.TimeoutExpired:
+        print('Smoke run exceeded 150 s (a GDScript parse error hangs the run); stopping Godot.')
+        godot.kill()
+        return 3
     finally:
+        if godot.poll() is None:
+            godot.kill()
         service.shutdown()
         service.server_close()
 

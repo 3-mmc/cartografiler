@@ -187,18 +187,24 @@ def page_count(path):
 
 
 # Generated or cache trees: rendered as marsh rather than clear tributaries.
-GENERATED = {'node_modules','__pycache__','.cache','cache','build','dist','target','.venv','venv','.git',
+GENERATED = {'node_modules','__pycache__','.cache','cache','build','dist','target','.venv','venv',
              '.tox','.mypy_cache','.pytest_cache','.gradle','.next','tmp','temp','.parcel-cache','obj'}
 
 
 def directory_facts(path, count_limit=5000, stat_limit=400):
     """Shallow survey of one directory: size of the tributary and its weather."""
     now = time.time()
-    facts = {'items':0,'changed_hour':0,'changed_day':0,'changed_week':0,'newest':0.0}
+    facts = {'items':0,'subdirs':0,'changed_hour':0,'changed_day':0,'changed_week':0,'newest':0.0}
     try:
         with os.scandir(path) as scan:
             for entry in scan:
                 facts['items'] += 1
+                try:
+                    facts['subdirs'] += entry.is_dir(follow_symlinks=False) and entry.name!='.git'
+                except OSError:
+                    pass
+                if entry.name=='.git':
+                    facts['git'] = True
                 if facts['items']>=count_limit:
                     facts['more'] = True
                     break
@@ -216,6 +222,23 @@ def directory_facts(path, count_limit=5000, stat_limit=400):
     except PermissionError:
         return {'readable':False}
     facts['generated'] = path.name in GENERATED
+    return facts
+
+
+def git_facts(path, timeout=1.5):
+    """A repository is a town: commits are its population, uncommitted changes its scaffolding."""
+    facts = {}
+    if not shutil.which('git'):
+        return facts
+    try:
+        count = subprocess.run(['git','-C',str(path),'rev-list','--count','HEAD'],capture_output=True,timeout=timeout)
+        if count.returncode==0:
+            facts['commits'] = int(count.stdout.strip() or 0)
+        status = subprocess.run(['git','-C',str(path),'status','--porcelain','-uno'],capture_output=True,timeout=timeout)
+        if status.returncode==0:
+            facts['uncommitted'] = len(status.stdout.splitlines())
+    except (OSError,ValueError,subprocess.TimeoutExpired):
+        pass
     return facts
 
 

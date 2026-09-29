@@ -10,6 +10,8 @@ filesystem and never borrows another system's meaning.
 | **Hydrology** | *How is it organised?* | the directory tree |
 | **Geology & landforms** | *What is this, how big, and how old?* | file type, metadata, modification time |
 | **Weather** | *What is happening now?* | recent modification activity |
+| **Sea & tides** | *How much room is left, and what is really here?* | disk usage; cloud-file hydration state |
+| **Human geography** | *Where do people act?* | your own visits; git repositories |
 
 Every encoding below is computed from real data. When the data is missing the map
 shows a neutral form (a grey, undated outcrop; a survey cairn under fog), never an
@@ -57,6 +59,8 @@ orientation off any view.
   rings by channel count. Every lake drains: a short outflow creek links it to the trunk.
 - **Waterfalls**: video. Moving water falling over a cliff: height from duration,
   width of the fall from resolution. The plunge pool also drains to the trunk.
+- **Canyons**: a subdirectory with six or more subfolders cuts a canyon, a deep, narrow
+  valley with banded red walls (the Grand Canyon). Branching depth becomes vertical depth.
 - **Glaciers**: archives (zip, tar, 7z…). Frozen, compressed water that moves slowly
   and holds material inside. Length comes from the number of entries in the archive;
   ice density (white to deep blue) from the compression ratio. Meltwater runs from the
@@ -75,7 +79,7 @@ Geology is a record of time, so rock type is age, and erosion runs from sharp to
 | < 1 day | **Fresh basalt, still cooling** | Black, jagged, with an ember glow at the summit |
 | < 7 days | **Fresh basalt** | Black, steep, sharp-crested |
 | < 6 months | **Weathered basalt** | Dark brown-grey, still angular |
-| < 3 years | **Sandstone** | Warm tan, terraced mesa steps |
+| < 3 years | **Sandstone** | Colorado Plateau forms: long documents stand as **mesas** (sheer banded cliffs under a flat caprock), middling ones as **buttes**, short ones weather into **hoodoos** (Bryce Canyon) |
 | ≥ 3 years | **Granite** | Pale, low, broad and rounded: the long worn range |
 
 A newly formed basalt cone is therefore a book you were editing this week. A long,
@@ -88,7 +92,7 @@ and age are read independently: height is size, and shape and colour are time.
 |---|---|---|
 | PDF; DOCX/PPTX with a page/slide count | **Mountain / ridge** | pages → height (bounded log); age → rock |
 | Other documents, notes, text | **Meadow** | size → extent; unknown page count stays a meadow |
-| Images | **Woodland** | pixel count → growth; orientation → shape; EXIF month → foliage |
+| Images | **Woodland** | pixel count → growth; orientation → shape; EXIF month → foliage; ≥ 40 MP → a giant **sequoia** |
 | Audio | **Lake** | duration → area; channels → ripples |
 | Video | **Waterfall** | duration → height; resolution → width |
 | CSV / TSV / spreadsheets | **Fields** | rows → length; columns → furrows |
@@ -97,7 +101,8 @@ and age are read independently: height is size, and shape and colour are time.
 | Executables & compiled objects | **Obsidian outcrop** | Rock transformed under heat and pressure; size → spire count |
 | Disk images (vhdx, iso, img, qcow2) | **Caldera** | A whole world collapsed into one crater; size → diameter |
 | Databases (sqlite, db, mdb) | **Well** | An aquifer: a deep store you draw from |
-| Symbolic links | **Signpost** beside the landform | Points somewhere else |
+| Symbolic links | **Natural arch** beside the landform | A span that leads somewhere else (Arches) |
+| Any file changed in the last 15 minutes | **Geyser** beside it | Live thermal activity (Yellowstone): logs being written, files being edited |
 | Anything else | **Cairn** | Uncharted |
 
 ## Weather: what's happening now
@@ -118,6 +123,54 @@ Subdirectories with activity today carry a small rain cloud of their own, so you
 see where work is happening from the parent's altitude before going in. `W` hides
 the weather layer.
 
+## Sea level: room left on the disk
+
+The sea stands at a level set by the mount's disk usage. Below 75% full it stays offshore.
+Above that it rises until, at a full disk, it laps the ground: coasts drown, river valleys
+become fjords, and only landforms stand clear. The cartouche states the percentage and the
+free space.
+
+## Tides: cloud-mirrored files
+
+Cloud-sync providers that use the Windows Cloud Files API (OneDrive, Proton Drive, and
+others) register their roots in the registry. Branch reads the roots once per session and
+each directory's attribute bits with one PowerShell call. **Reading them never downloads
+anything.** The sea is the cloud:
+
+| State | Attribute | Form |
+|---|---|---|
+| Cloud-only placeholder | RECALL_ON_DATA_ACCESS / OFFLINE | **Phantom island**: ghostly and translucent, in sea mist. Charted and named, but not on this disk until opened. (Old sea charts carried reported islands that did not exist.) |
+| Always keep on this device | PINNED | **Dike**: a stone ring holding the land against the tide |
+| Downloaded, not pinned | neither | **Tidal flat**: wet sand; Windows may reclaim it when space runs low |
+| The sync root itself | registered root | **Lighthouse and pier**: the harbour where the cloud comes ashore |
+
+Not yet drawn: sync *activity* (a ferry on a shipping lane) and sync *errors* (a wreck on a
+reef). Their status lives in each provider's shell extension, not in file attributes.
+
+## Human geography: where people act
+
+- **Roads** are desire paths. Every folder you enter and file you open in Branch is counted
+  locally (`~/.local/share/branch/visits.json`). Routes wear from the island's gate, where
+  you arrive from the parent, and widen with use. They cross rivers as fords.
+- **Walled towns** are git repositories. Commits are the population (more houses), and
+  uncommitted changes stand as scaffolding. Source files outside repositories remain small
+  **settlements**.
+
+## Time: replaying the record
+
+`Y` opens a time slider over the current region. Dragging it redraws the map as it stood
+on that date: rock is re-aged (today's granite was yesterday's sandstone), and weather is
+recomputed. Files whose last change comes later haven't formed yet. **Only
+last-modification times exist**, so a file appears at its most recent change, not its
+creation. The slider says so.
+
+## Scale: archipelagos
+
+Up to 120 entries share one island. Beyond that, up to 600 per page, a region becomes an
+**archipelago**: islands grouped by kind (folders, images, captions…) of at most 90 entries
+each, named on the map, with each landmark drawn as a simple glyph. Per-file metadata isn't
+fetched at archipelago scale, so forms stay neutral rather than guessed.
+
 ---
 
 ## Interface: the map is the application
@@ -135,4 +188,5 @@ the weather layer.
   appears only after an undoable change.
 - **Chrome fades** to a faint outline while the mouse is idle and returns on movement.
   `F` hides everything but the map.
+- **Time** (`Y`): the replay slider.
 - **Legend** (`?` / `K`): this grammar, in the app.

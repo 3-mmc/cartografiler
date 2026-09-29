@@ -141,6 +141,43 @@ class CoreTests(unittest.TestCase):
         self.assertIn(facts['zone'],('native','windows','network','ephemeral'))
         self.assertTrue(facts['writable'])
 
+    def test_visits_wear_roads(self):
+        from branchfm import visits
+        store = self.root/'visits.json'
+        for _ in range(3): visits.record(store,'/a')
+        visits.record(store,'/b')
+        self.assertEqual(visits.counts(store,['/a','/b','/c']),{'/a':3,'/b':1})
+
+    def test_tide_states_from_windows_attributes(self):
+        from branchfm.cloud import tide, to_windows, to_linux
+        self.assertEqual(tide(0x400420),'cloud')    # recall on data access: phantom island
+        self.assertEqual(tide(0x80420),'pinned')    # always keep on this device: diked
+        self.assertEqual(tide(0x420),'local')       # downloaded, unpinned: tidal flat
+        self.assertEqual(to_windows(Path('/mnt/e/One Drive/x')),'E:\\One Drive\\x')
+        self.assertEqual(to_linux('E:\\One Drive\\x'),'/mnt/e/One Drive/x')
+
+    @unittest.skipUnless(shutil.which('git'),'git unavailable')
+    def test_git_repository_is_a_town(self):
+        import subprocess
+        from branchfm.atlas import git_facts
+        repo = self.root/'town'
+        repo.mkdir()
+        run = lambda *a: subprocess.run(['git','-C',str(repo),*a],check=True,capture_output=True)
+        run('init','-q')
+        (repo/'a.txt').write_text('a')
+        run('add','a.txt')
+        run('-c','user.name=t','-c','user.email=t@t','commit','-qm','first')
+        (repo/'a.txt').write_text('changed')
+        self.assertEqual(git_facts(repo),{'commits':1,'uncommitted':1})
+        facts = metadata(repo)
+        self.assertTrue(facts['git'])
+        self.assertEqual(facts['subdirs'],0)
+
+    def test_disk_usage_sets_sea_level(self):
+        from branchfm.service import filesystem
+        facts = filesystem(self.root)
+        self.assertTrue(0<=facts['used']<=1)
+
     def test_expanded_siblings_have_disjoint_bands(self):
         for name in ('alpha','beta'):
             folder = self.root/name

@@ -33,7 +33,7 @@ There are no permanent panels. A **cartouche** (top left) names the region, give
 | Backspace · ↑ in the cartouche | Up to the parent region |
 | Right or middle drag · wheel · + / − | Pan · zoom |
 | Z | Parent overview / local view |
-| G or Tab · K or ? · W · L · T · F · I | Gazetteer · legend · weather · labels · climate override · map only · collapse notes |
+| G or Tab · K or ? · W · Y · L · T · F · I | Gazetteer · legend · weather · time slider · labels · climate override · map only · collapse notes |
 | Ctrl+P · Ctrl+L | Bash navigation palette · type a path |
 | Space · F2 · Delete · Ctrl+C/X/V · Ctrl+Z · Ctrl+Shift+N | Peek · rename · trash · copy/cut/paste · undo · new folder |
 
@@ -58,6 +58,9 @@ The full grammar, with the reasoning behind each choice, is in **[docs/cartograp
 - **Climate is the mount.** Linux-native = temperate, Windows volumes over 9p = tropical, network = wetland, tmpfs/proc = desert, not writable = alpine.
 - **Water flows toward the parent.** Subdirectories are tributaries sized by their item count. Empty folders are dry riverbeds, and cache/generated folders are marshes. Audio are lakes, video waterfalls, and archives glaciers (entries → length, compression → blue ice).
 - **Landform is file type; rock is age.** Paged documents are mountains. Fresh basalt (black, sharp, glowing if changed today) weathers to sandstone terraces and finally worn granite. Images are woodland, tables fields, source settlements, executables obsidian, disk images calderas, and databases wells.
+- **Sea level is disk usage**; past 75% full the coast floods. **Tides** mark cloud files (OneDrive, Proton Drive): cloud-only placeholders are phantom islands, pinned files sit behind dikes, and downloaded ones lie on tidal flats.
+- **Human geography:** roads are worn by your own visits, and git repositories are walled towns with scaffolding for uncommitted work. Sandstone erodes into mesas, buttes and hoodoos. Busy folders cut canyons. Files changed in the last 15 minutes erupt as geysers. Symlinks are natural arches.
+- **Time (`Y`)** replays last-modified times. Folders over 120 entries become **archipelagos**.
 - **Weather is recent activity.** Storms, showers and cumulus for changes this hour, today or this week. Snow for regions untouched for over two years. Fog over unexplored folders.
 
 Directory ancestry creates nested geography. Entering a folder follows its tributary upstream into a real miniature landscape; visited parents and siblings are kept.
@@ -72,7 +75,7 @@ Directory ancestry creates nested geography. Entering a folder follows its tribu
 
 ## Scope and dependencies
 
-This is a working prototype. Large directories are mapped in **120-entry pages**, with filtering across the whole directory. It does not recursively scan an entire drive. Geometry is generated from metadata, not proprietary game assets. Label modes, explored geography, and manual climate changes are session-local.
+This is a working prototype. Large directories are mapped in **600-entry pages** (archipelagos beyond 120), with filtering across the whole directory. It does not recursively scan an entire drive. Geometry is generated from metadata, not proprietary game assets. Label modes, explored geography, and manual climate changes are session-local.
 
 Python 3.11+, Godot 4.x, Pillow (optional image support), Poppler (`pdfinfo`, `pdftotext`), and FFmpeg (`ffprobe`) are used. The official Godot 4.7.2 runtime is installed locally under `tools/`; it is excluded from source control. DejaVu fonts are bundled with their licence.
 

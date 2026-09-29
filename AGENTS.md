@@ -45,12 +45,16 @@ python3 -m unittest discover -s tests -v
 ./atlas demo --smoke --capture /tmp/x.png --focus 'Glacier crossing.mp4'   # close-up of one landform
 ```
 
-- A GDScript parse error makes the smoke run hang (its timeout timer lives in the failed script): always wrap it in `timeout` and grep for `SCRIPT ERROR`.
+- A GDScript parse error used to hang the smoke run, because its timeout timer lives in the failed script. The launcher now kills Godot after 150 s in `--smoke`, and on SIGTERM/SIGINT. A force-killed Godot window can stay on screen as an unclosable WSLg ghost; `wsl --shutdown` clears it.
+- Capture flags for inspection: `--focus NAME`, `--enter SUBFOLDER`, `--time`, `--legend`.
 - `ERR_CANT_OPEN` from `audio_driver_alsa` in windowed runs is WSLg having no ALSA device; pre-existing and harmless.
 - The demo generator is versioned by `demo/.atlas-demo-v2`; delete `demo/` to regenerate after changing it.
 
 - Sandboxed tools cannot create loopback sockets here; integrated app tests require sandbox escalation. Read-only headless import can emit socket warnings unrelated to script parsing.
 - Preview/metadata workers are bounded subprocesses. Never execute a file's contents to preview it.
 - File operations refuse collisions. Trash is Branch's own recoverable store under `$XDG_DATA_HOME/branch/trash` (normally `~/.local/share/branch/trash`), not the Windows Recycle Bin. Undo covers moves/renames/trash within a session, not copies or mkdir.
-- The initial native prototype maps 120 entries per page, with filters and pagination. Be explicit about this limit; it is not yet an unbounded full-disk renderer.
+- The map shows up to 600 entries per page; over 120 becomes an archipelago of glyph islands with no per-file metadata. Be explicit about this limit; it is not an unbounded full-disk renderer.
+- Cloud tides come from `branchfm/cloud.py`: sync roots from `HKLM\...\Explorer\SyncRootManager` (cached per session), attributes via one `powershell.exe -EncodedCommand` per directory (~1 s). Never hydrate files. Verified 2026-09-28 on OneDrive (C:, two E: business accounts) and Proton Drive.
+- Visits (roads) are stored locally in `$XDG_DATA_HOME/branch/visits.json`.
+- Child regions sit at `SEAT` (y 0.13) above the parent's ground. Lower seats get buried under the magnified parent terrain; this showed up with large (archipelago) children.
 - Never copy proprietary game assets into this project. Inspect the reference for visual principles and generate original geometry/materials.

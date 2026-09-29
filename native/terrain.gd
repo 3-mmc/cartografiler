@@ -16,7 +16,18 @@ const DAY = 86400.0
 const GROUND = 0.11
 const CARVE = 0.07
 var materials = {}
+var ghosts = {}
 var shared_vertex_material: StandardMaterial3D
+# Time slider: 0 = now. Otherwise the map is drawn as it stood at this Unix time.
+var epoch = 0.0
+
+func now() -> float:
+	return epoch if epoch > 0.0 else Time.get_unix_time_from_system()
+
+# Whether a file had reached its current state by the epoch. Only last-modification
+# times are known, so an entry "forms" at its last change, not at its creation.
+func formed(entry: Dictionary) -> bool:
+	return entry.directory or epoch <= 0.0 or float(entry.get("modified", 0.0)) <= epoch
 
 # ---------------------------------------------------------------- primitives
 
@@ -104,11 +115,11 @@ static func numeric(value) -> bool:
 
 # ---------------------------------------------------------------- time → rock
 
-static func age_days(entry: Dictionary) -> float:
+func age_days(entry: Dictionary) -> float:
 	var modified = float(entry.get("modified", 0.0))
 	if modified <= 0.0:
 		return -1.0
-	return maxf(0.0, (Time.get_unix_time_from_system() - modified) / DAY)
+	return maxf(0.0, (now() - modified) / DAY)
 
 static func ago(days: float) -> String:
 	if days < 0.0: return "at an unknown time"
@@ -194,7 +205,7 @@ func hydrology(entries: Array, points: Array, facts: Dictionary, seed_value: int
 	var mouth = out*boundary*1.12
 	var source = -out*boundary*0.38 + Vector3(-out.z, 0, out.x)*boundary*0.12
 	var trunk = meander(source, mouth, seed_value, boundary*0.12, interval)
-	var channels = [{"points":trunk, "width":0.075+0.028*log(1.0+entries.size()), "kind":"river", "index":-1}]
+	var channels = [{"points":trunk, "width":0.075+0.028*log(1.0+entries.size()), "kind":"river", "index":-1, "depth":CARVE}]
 	for i in entries.size():
 		var entry = entries[i]
 		var kind = ""
@@ -205,6 +216,7 @@ func hydrology(entries: Array, points: Array, facts: Dictionary, seed_value: int
 			if f.get("readable", true) == false: kind = "river"
 			elif numeric(f.get("items")) and int(f.items) == 0: kind = "dry"
 			elif f.get("generated", false) or entry.name in GENERATED: kind = "marsh"
+			elif int(f.get("subdirs", 0)) >= 6: kind = "canyon"  # deep branching cuts deep
 			else: kind = "river"
 		elif entry.kind in ["audio", "video", "archives"]:
 			kind = "creek"  # lakes drain, falls run on, glaciers melt
@@ -216,7 +228,7 @@ func hydrology(entries: Array, points: Array, facts: Dictionary, seed_value: int
 			continue
 		var line = meander(points[i], join, seed_value+i*7919, minf(0.9, points[i].distance_to(join)*0.18), interval)
 		var direction = join - points[i]
-		channels.append({"points":line, "width":width, "kind":kind, "index":i,
+		channels.append({"points":line, "width":width, "kind":kind, "index":i, "depth":CARVE*2.6 if kind == "canyon" else CARVE,
 			"angle":atan2(direction.z/0.83, direction.x) if direction.length() > 0.01 else mouth_angle})
 	return channels
 
@@ -224,8 +236,10 @@ func draw_channel(parent: Node3D, channel: Dictionary):
 	var points: PackedVector3Array = channel.points
 	var width: float = channel.width
 	var kind: String = channel.kind
-	var color = {"river":Color("3f7580"), "creek":Color("4b8189"), "marsh":Color("56654a"), "dry":Color("b2a27f")}[kind]
-	var level = GROUND - CARVE*0.45 if kind != "dry" else GROUND - CARVE*0.35
+	var color = {"river":Color("3f7580"), "canyon":Color("3b6d73"), "creek":Color("4b8189"), "marsh":Color("56654a"), "dry":Color("b2a27f")}[kind]
+	var depth = float(channel.get("depth", CARVE))
+	var level = GROUND - depth*(0.45 if kind != "canyon" else 0.8)
+	if kind == "dry": level = GROUND - CARVE*0.35
 	var braids = [0.0] if kind != "marsh" else [-1.3, 0.0, 1.2]
 	var vertices = PackedVector3Array()
 	var colors = PackedColorArray()
@@ -252,7 +266,7 @@ func draw_channel(parent: Node3D, channel: Dictionary):
 
 # ---------------------------------------------------------------- land
 
-func land(entries: Array, points: Array, climate: int, seed_value: int, channels: Array, snow: float) -> Node3D:
+func land(entries: Array, points: Array, climate: int, seed_value: int, channels: Array, snow: float, sea: float = 0.0) -> Node3D:
 	var root = Node3D.new()
 	var extent = radius(entries)*1.35
 	var boundary = radius(entries)*0.90
@@ -270,8 +284,8 @@ func land(entries: Array, points: Array, climate: int, seed_value: int, channels
 	for point in points:
 		stamp(lift, point, 2.2, cell, extent, resolution, func(d): return 2.2 - d, true)
 	for channel in channels:
-		var valley = maxf(channel.width*4.0, cell*1.8)
-		var depth = CARVE if channel.kind != "dry" else CARVE*0.55
+		var valley = maxf(channel.width*4.0, cell*1.8) if channel.kind != "canyon" else maxf(channel.width*2.4, cell*1.3)
+		var depth = float(channel.get("depth", CARVE)) if channel.kind != "dry" else CARVE*0.55
 		for p in channel.points:
 			stamp(carve, p, valley, cell, extent, resolution, func(d): return depth*(1.0 - smoothstep(0.0, valley, d)), true)
 	var vertices = PackedVector3Array()
@@ -291,7 +305,11 @@ func land(entries: Array, points: Array, climate: int, seed_value: int, channels
 			if signed_land > 1.0: height += grain*0.024
 			height -= carve[index]
 			var color = LAND[climate].lightened(grain*0.14)
-			if carve[index] > 0.0:
+			if carve[index] > CARVE*1.05:
+				# Canyon walls: banded strata, as in the Grand Canyon.
+				var band = int(carve[index]/(CARVE*0.35)) % 3
+				color = [Color("a4552f"), Color("c9955f"), Color("7e4a33")][band]
+			elif carve[index] > 0.0:
 				color = color.lerp(Color("4a5641"), carve[index]/CARVE*0.55)
 			if snow > 0.0 and signed_land > 0.4:
 				color = color.lerp(SNOW, clampf(snow*(0.55+grain*1.4), 0.0, 0.9))
@@ -305,7 +323,36 @@ func land(entries: Array, points: Array, climate: int, seed_value: int, channels
 	mesh_node(root, vertices, colors, indices)
 	for channel in channels:
 		draw_channel(root, channel)
+	if sea > 0.0:
+		# Sea level from disk usage: as the disk fills, the coast floods.
+		var plane = PlaneMesh.new()
+		plane.size = Vector2(extent*2.0, extent*2.0)
+		shape(root, plane, Vector3(0, lerpf(-0.31, GROUND-0.012, sea), 0), Color("2f6572"), 0.9)
 	return root
+
+static func flood(used) -> float:
+	return smoothstep(0.75, 0.99, float(used)) if numeric(used) else 0.0
+
+func roads(parent: Node3D, gate: Vector3, targets: Array, seed_value: int):
+	# Desire paths: routes you actually travel, worn wider with use.
+	var vertices = PackedVector3Array()
+	var colors = PackedColorArray()
+	var indices = PackedInt32Array()
+	for target in targets:
+		var point: Vector3 = target[0]
+		var width = 0.025 + 0.022*log(1.0 + float(target[1]))
+		var line = meander(gate, point, seed_value + int(point.x*1000), minf(0.6, gate.distance_to(point)*0.08), 0.12)
+		var base = vertices.size()
+		for i in line.size():
+			var tangent = line[mini(i+1, line.size()-1)] - line[maxi(0, i-1)]
+			var normal = Vector3(-tangent.z, 0, tangent.x).normalized()*width
+			vertices.append(line[i] + normal + Vector3(0, GROUND+0.018, 0))
+			vertices.append(line[i] - normal + Vector3(0, GROUND+0.018, 0))
+			colors.append(Color("bba882")); colors.append(Color("a8946d"))
+			if i > 0:
+				var a = base + (i-1)*2
+				indices.append_array(PackedInt32Array([a, a+2, a+1, a+1, a+2, a+3]))
+	mesh_node(parent, vertices, colors, indices)
 
 func stamp(grid: PackedFloat32Array, point: Vector3, reach: float, cell: float, extent: float, resolution: int, value: Callable, maximum: bool):
 	var cx = int(round((point.x/extent+1.0)*0.5*resolution))
@@ -325,6 +372,12 @@ func stamp(grid: PackedFloat32Array, point: Vector3, reach: float, cell: float, 
 
 func mountain(parent: Node3D, height: float, age: float, climate: int, seed_value: int):
 	var r = rock(age)
+	if r.steps > 0:
+		# Sandstone erodes into the Colorado Plateau's forms: big books stand as mesas,
+		# middling ones as buttes, short ones weather into Bryce-style hoodoos.
+		if height < 1.3: hoodoos(parent, height, seed_value)
+		else: mesa(parent, height*0.7, climate, seed_value, height >= 2.6)
+		return
 	if age >= 1095.0: height *= 0.72  # old ranges are worn down
 	var noise = FastNoiseLite.new()
 	noise.seed = seed_value
@@ -383,6 +436,79 @@ func mountain(parent: Node3D, height: float, age: float, climate: int, seed_valu
 		globe(holder, summit + Vector3(0, 0.02, 0), 0.08, Color("ff7a2a"), 1.0, 0.6, 2.4)
 		globe(holder, summit + Vector3(0.05, 0.45, 0), 0.16, Color("8a8580"), 0.35)
 		globe(holder, summit + Vector3(0.14, 0.75, 0.04), 0.22, Color("a09b95"), 0.22)
+
+static func sandstone_form(height: float) -> String:
+	return "hoodoos" if height < 1.3 else "butte" if height < 2.6 else "mesa"
+
+func mesa(parent: Node3D, height: float, climate: int, seed_value: int, wide: bool):
+	var noise = FastNoiseLite.new()
+	noise.seed = seed_value
+	noise.frequency = 1.4
+	var spread = 1.2 if wide else 0.62
+	var lx = 2.0*spread
+	var lz = 1.45*spread
+	var nx = 52
+	var nz = 40
+	var vertices = PackedVector3Array()
+	var colors = PackedColorArray()
+	var indices = PackedInt32Array()
+	var keep = PackedByteArray()
+	var strata = [Color("a4552f"), Color("d6ad78"), Color("8d4b2c"), Color("c98f5a")]
+	for z in range(nz+1):
+		for x in range(nx+1):
+			var px = (float(x)/nx*2-1)*lx*1.35
+			var pz = (float(z)/nz*2-1)*lz*1.35
+			var d = sqrt(pow(px/lx, 2) + pow(pz/lz, 2))*(1.0 + 0.16*noise.get_noise_2d(px*1.5, pz*1.5))
+			var cap = height*smoothstep(0.0, 0.07, 1.0 - d)  # sheer cliff under a flat caprock
+			var talus = height*0.24*(1.0 - smoothstep(0.9, 1.32, d))
+			var elevation = maxf(cap, talus) + (noise.get_noise_2d(px*4, pz*4)*0.03 if cap >= height*0.98 else 0.0)
+			var color: Color
+			if cap >= height*0.97: color = Color("b98d62").lightened(noise.get_noise_2d(px*3, pz*3)*0.1)
+			elif elevation > talus + 0.01: color = strata[int(elevation/maxf(0.01, height)*7.0) % strata.size()]
+			else: color = LAND[climate].lerp(Color("b07a55"), smoothstep(0.0, height*0.24, elevation))
+			vertices.append(Vector3(px, 0.12+elevation, pz)); colors.append(color)
+			keep.append(1 if d < 1.34 else 0)
+			if x < nx and z < nz:
+				var a = z*(nx+1)+x
+				indices.append_array(PackedInt32Array([a, a+nx+1, a+1, a+1, a+nx+1, a+nx+2]))
+	var kept = PackedInt32Array()
+	for i in range(0, indices.size(), 3):
+		if keep[indices[i]] + keep[indices[i+1]] + keep[indices[i+2]] > 0:
+			kept.append_array(PackedInt32Array([indices[i], indices[i+1], indices[i+2]]))
+	var holder = Node3D.new()
+	holder.rotation.y = float(posmod(seed_value, 628))/100
+	parent.add_child(holder)
+	mesh_node(holder, vertices, colors, kept)
+
+func hoodoos(parent: Node3D, height: float, seed_value: int):
+	var random = RandomNumberGenerator.new()
+	random.seed = seed_value
+	for i in random.randi_range(4, 7):
+		var pos = Vector3(random.randf_range(-0.45, 0.45), 0.1, random.randf_range(-0.35, 0.35))
+		var tall = random.randf_range(0.5, 1.0)*maxf(height, 0.7)
+		cone(parent, pos, random.randf_range(0.07, 0.1), tall*0.55, Color("d9804a"), 6, 0.06)
+		cone(parent, pos+Vector3(0, tall*0.55, 0), 0.06, tall*0.4, Color("e8b08a"), 6, 0.045)
+		globe(parent, pos+Vector3(0, tall*0.97, 0), 0.08, Color("8a6a55"), 1.0, 0.45)
+
+func geyser(parent: Node3D) -> Node3D:
+	# Yellowstone: a file changing right now. Prismatic rings and an erupting plume.
+	var spot = Node3D.new()
+	spot.position = Vector3(0.75, 0, 0.55)
+	parent.add_child(spot)
+	for ring in [[0.34, Color("d9822b")], [0.25, Color("e3c24a")], [0.15, Color("2f7fa3")]]:
+		var disc = CylinderMesh.new()
+		disc.top_radius = ring[0]
+		disc.bottom_radius = ring[0]
+		disc.height = 0.02
+		disc.radial_segments = 20
+		shape(spot, disc, Vector3(0, 0.12 + (0.34-ring[0])*0.02, 0), ring[1])
+	var plume = Node3D.new()
+	plume.name = "Plume"
+	spot.add_child(plume)
+	for i in 4:
+		globe(plume, Vector3(0, 0.25+i*0.3, 0), 0.11+i*0.05, Color("f2f5f5"), 0.55-i*0.1)
+	parent.set_meta("geyser", plume)
+	return plume
 
 func pool(parent: Node3D, spread: float, seed_value: int, murky: bool = false):
 	var random = RandomNumberGenerator.new()
@@ -627,6 +753,10 @@ func woodland(parent: Node3D, facts: Dictionary, climate: int, random: RandomNum
 		if month in [9, 10, 11]: leaf = Color("b88b42")
 		elif month in [12, 1, 2]: leaf = leaf.lightened(0.24)
 	if h > w and w > 0: growth *= 1.2
+	if w*h >= 40.0e6:
+		# A giant sequoia for very large photographs.
+		cone(parent, Vector3(0, 0.12, 0), 0.16, 2.1, Color("7a3b22"), 7, 0.08)
+		cone(parent, Vector3(0, 1.3, 0), 0.5, 1.4, Color("2f4a30"), 7)
 	for i in count:
 		var angle = random.randf()*TAU
 		var spread = sqrt(random.randf())*1.05
@@ -680,6 +810,9 @@ func directory_marker(parent: Node3D, entry: Dictionary, facts: Dictionary, rand
 		for i in 10:
 			cone(parent, Vector3(random.randf_range(-0.7, 0.7), 0.1, random.randf_range(-0.5, 0.5)), 0.025, random.randf_range(0.16, 0.3), Color("7d7a4a"), 4)
 		return
+	if facts.get("git", false):
+		town(parent, facts, random)
+		return
 	cone(parent, Vector3(0, 0.12, 0), 0.045, 0.65, Color("8d8769"), 8, 0.035)
 	box(parent, Vector3(0.1, 0.62, 0), Vector3(0.18, 0.1, 0.012), Color("c9a95b"))
 	var fog = 2 + (mini(4, int(log(1.0+items)/log(3.0))) if items > 0 else 1)
@@ -692,13 +825,159 @@ func directory_marker(parent: Node3D, entry: Dictionary, facts: Dictionary, rand
 		parent.set_meta("drops", drops)
 		parent.set_meta("top", 1.3)
 
-func signpost(parent: Node3D):
-	box(parent, Vector3(0.55, 0.1, 0.45), Vector3(0.025, 0.38, 0.025), Color("6a5541"))
-	var board = box(parent, Vector3(0.62, 0.4, 0.45), Vector3(0.18, 0.06, 0.015), Color("d9c68f"))
-	board.rotation.y = 0.3
+func town(parent: Node3D, facts: Dictionary, random: RandomNumberGenerator):
+	# A git repository: a walled town. Commits are population; uncommitted changes scaffolding.
+	var commits = int(facts.get("commits", 1)) if numeric(facts.get("commits")) else 1
+	var wall = TorusMesh.new()
+	wall.inner_radius = 0.62
+	wall.outer_radius = 0.7
+	wall.rings = 28
+	wall.ring_segments = 4
+	var ring = shape(parent, wall, Vector3(0, 0.14, 0), Color("8b8474"))
+	ring.scale = Vector3(1, 1.6, 0.8)
+	var houses = clampi(2+int(log(1.0+commits)/log(2.2)), 2, 12)
+	for i in houses:
+		var angle = random.randf()*TAU
+		var d = sqrt(random.randf())*0.45
+		var pos = Vector3(cos(angle)*d, 0.08, sin(angle)*d*0.8)
+		var house = box(parent, pos, Vector3(0.13, 0.14, 0.15), Color("d6c3a4"))
+		house.rotation.y = angle
+		var roof = cone(parent, pos+Vector3(0, 0.14, 0), 0.12, 0.12, Color("8a5140"), 4)
+		roof.rotation.y = angle+PI/4
+	cone(parent, Vector3(0, 0.08, 0), 0.07, 0.55, Color("bfae90"), 6, 0.05)
+	cone(parent, Vector3(0, 0.63, 0), 0.09, 0.16, Color("6d4a3a"), 6)
+	for i in mini(6, int(facts.get("uncommitted", 0))):
+		var pos = Vector3(0.28 + (i%3)*0.07, 0.08, -0.2 + (i/3)*0.07)
+		box(parent, pos, Vector3(0.012, 0.32, 0.012), Color("c9b27a"))
+	if int(facts.get("uncommitted", 0)) > 0:
+		box(parent, Vector3(0.35, 0.26, -0.16), Vector3(0.2, 0.012, 0.14), Color("c9b27a"))
 
-func feature(entry: Dictionary, facts: Dictionary, climate: int) -> Node3D:
+func arch(parent: Node3D):
+	# Symbolic links: natural arches, a span that leads somewhere else.
+	var span = TorusMesh.new()
+	span.inner_radius = 0.2
+	span.outer_radius = 0.3
+	span.rings = 20
+	span.ring_segments = 6
+	var instance = shape(parent, span, Vector3(0.62, 0.1, 0.5), Color("b8683f"))
+	instance.rotation = Vector3(PI/2, 0.4, 0)
+
+func lighthouse(parent: Node3D):
+	# The root of a cloud-synced folder: a harbour, lit.
+	box(parent, Vector3(-0.55, 0.08, 0.5), Vector3(0.5, 0.05, 0.12), Color("6a5541"))
+	cone(parent, Vector3(-0.35, 0.1, 0.5), 0.09, 0.62, Color("eeeae0"), 8, 0.06)
+	cone(parent, Vector3(-0.35, 0.32, 0.5), 0.085, 0.12, Color("b0412f"), 8, 0.078)
+	globe(parent, Vector3(-0.35, 0.78, 0.5), 0.07, Color("ffe7a3"), 1.0, 0.9, 2.5)
+
+func tide_mark(parent: Node3D, state: String):
+	match state:
+		"cloud":
+			# Phantom island: charted and named, but not physically here until downloaded.
+			ghost(parent)
+			for i in 2:
+				globe(parent, Vector3(0.3-i*0.6, 0.25, 0.2*i), 0.55, Color("dbe6ea"), 0.18, 0.3)
+		"pinned":
+			# Always kept on this device: land behind a dike.
+			var dike = TorusMesh.new()
+			dike.inner_radius = 1.05
+			dike.outer_radius = 1.16
+			dike.rings = 32
+			dike.ring_segments = 4
+			var ring = shape(parent, dike, Vector3(0, 0.13, 0), Color("6f6a5c"))
+			ring.scale = Vector3(1, 1.2, 0.8)
+		"local":
+			# Downloaded but reclaimable: a tidal flat that the tide can take back.
+			var flat = CylinderMesh.new()
+			flat.top_radius = 1.12
+			flat.bottom_radius = 1.12
+			flat.height = 0.01
+			flat.radial_segments = 28
+			var sand = shape(parent, flat, Vector3(0, 0.116, 0), Color("8f8a72"), 0.6)
+			sand.scale = Vector3(1, 1, 0.8)
+
+func ghost(node: Node):
+	for child in node.get_children():
+		ghost(child)
+	if node is MeshInstance3D and node.material_override != null:
+		var original: StandardMaterial3D = node.material_override
+		if not ghosts.has(original):
+			var mat: StandardMaterial3D = original.duplicate()
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color = Color(original.albedo_color.lerp(Color("cfe3ea"), 0.45), 0.3)
+			mat.emission_enabled = false
+			ghosts[original] = mat
+		node.material_override = ghosts[original]
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+func glyph(parent: Node3D, entry: Dictionary, climate: int):
+	# Archipelago scale: one simple symbol per landmark, coloured by kind and rock age.
+	match entry.kind:
+		"folders": cone(parent, Vector3(0, 0.1, 0), 0.04, 0.5, Color("c9a95b"), 6, 0.03)
+		"pdf": cone(parent, Vector3(0, 0.1, 0), 0.4, 0.55, rock(age_days(entry)).high, 6)
+		"images": tree(parent, Vector3(0, 0.12, 0), 0.9, climate, Color("345f3c"))
+		"audio", "video": pool(parent, 0.35, hash(entry.path))
+		"archives": box(parent, Vector3(0, 0.1, 0), Vector3(0.5, 0.12, 0.25), Color("dfeaee"))
+		"code": box(parent, Vector3(0, 0.08, 0), Vector3(0.2, 0.2, 0.22), Color("d1bda0"))
+		"tables": box(parent, Vector3(0, 0.08, 0), Vector3(0.5, 0.03, 0.4), Color("b19a57"))
+		"binaries": cone(parent, Vector3(0, 0.1, 0), 0.1, 0.5, Color("17151b"), 5, 0.01, 0.9)
+		_: cone(parent, Vector3(0, 0.08, 0), 0.08, 0.16, Color("9c9a86"), 5)
+
+# Archipelagos: a region over 120 entries becomes islands grouped by kind, each at most
+# ISLAND entries, drawn with simple glyphs. Still one landmark per entry.
+const ISLAND = 90
+const ISLAND_NAMES = {"folders":"Folders", "pdf":"PDFs", "images":"Images", "audio":"Audio", "video":"Video", "tables":"Tables",
+	"code":"Source", "archives":"Archives", "binaries":"Executables", "disks":"Disk images", "databases":"Databases", "documents":"Documents"}
+
+func archipelago(entries: Array) -> Array:
+	if entries.size() <= 120:
+		return [{"indices":range(entries.size()), "name":"", "centre":Vector3.ZERO}]
+	var groups = {}
+	var order = []
+	for i in entries.size():
+		var kind = entries[i].kind
+		if not groups.has(kind):
+			groups[kind] = []
+			order.append(kind)
+		groups[kind].append(i)
+	var islands = []
+	for kind in order:
+		var members = groups[kind]
+		var parts = int(ceil(members.size()/float(ISLAND)))
+		for part in parts:
+			var chunk = members.slice(part*ISLAND, mini((part+1)*ISLAND, members.size()))
+			var first = entries[chunk[0]].name.substr(0, 1).to_upper()
+			var last = entries[chunk[-1]].name.substr(0, 1).to_upper()
+			islands.append({"indices":chunk, "name":"%s · %d%s" % [ISLAND_NAMES.get(kind, "Other"), chunk.size(), "  %s–%s" % [first, last] if parts > 1 else ""]})
+	# Place islands on a spiral, without overlap.
+	var placed = []
+	for island in islands:
+		var r = radius(island.indices.map(func(i): return entries[i]))*1.05
+		var centre = Vector3.ZERO
+		var k = placed.size()
+		var step = 0.0
+		while true:
+			var angle = k*2.39996 + step*0.37
+			centre = Vector3(cos(angle), 0, sin(angle)*0.83)*step
+			var clear = true
+			for other in placed:
+				if centre.distance_to(other.centre) < (r + other.r)*1.18:
+					clear = false
+					break
+			if clear: break
+			step += 1.5
+		island.centre = centre
+		island.r = r
+		placed.append(island)
+	return islands
+
+func feature(entry: Dictionary, facts: Dictionary, climate: int, simple: bool = false) -> Node3D:
 	var root = Node3D.new()
+	if not formed(entry):
+		return root  # time slider: not yet in this state
+	if simple:
+		glyph(root, entry, climate)
+		if entry.get("tide") != null: tide_mark(root, entry.tide)
+		return root
 	var random = RandomNumberGenerator.new()
 	random.seed = hash(entry.path)
 	var kind = entry.kind
@@ -719,7 +998,10 @@ func feature(entry: Dictionary, facts: Dictionary, climate: int) -> Node3D:
 	elif kind == "folders": directory_marker(root, entry, facts, random)
 	elif kind == "documents": meadow(root, entry, random)
 	else: cairn(root)
-	if entry.get("symlink", false): signpost(root)
+	if entry.get("symlink", false): arch(root)
+	if entry.get("sync_root", false): lighthouse(root)
+	if not entry.directory and age_days(entry) >= 0.0 and age_days(entry) < 15.0/1440.0: geyser(root)
+	if entry.get("tide") != null: tide_mark(root, entry.tide)
 	return root
 
 # ---------------------------------------------------------------- reading
@@ -728,6 +1010,17 @@ func reading(entry: Dictionary, facts: Dictionary) -> String:
 	# Say in words why the landform looks as it does.
 	var age = age_days(entry)
 	var when = "Modified " + ago(age) + "."
+	var suffix = ""
+	match entry.get("tide"):
+		"cloud": suffix = " Phantom island: cloud-only, charted but not on this disk until opened."
+		"pinned": suffix = " Diked: always kept on this device."
+		"local": suffix = " Tidal flat: downloaded, but Windows may reclaim it."
+	if entry.get("symlink", false): suffix += " The arch marks a symbolic link."
+	if entry.get("sync_root", false): suffix += " Lighthouse: the root of a cloud-synced folder."
+	if not entry.directory and age >= 0.0 and age < 15.0/1440.0: suffix += " Geyser: changed in the last 15 minutes."
+	return reading_core(entry, facts, age, when) + suffix
+
+func reading_core(entry: Dictionary, facts: Dictionary, age: float, when: String) -> String:
 	var kind = entry.kind
 	var pages = facts.get("pages")
 	if kind == "folders":
@@ -735,17 +1028,30 @@ func reading(entry: Dictionary, facts: Dictionary) -> String:
 		var items = facts.get("items")
 		if not numeric(items): return "Tributary valley, not yet surveyed."
 		if int(items) == 0: return "Dry riverbed: an empty directory."
-		var text = "%s: %d%s items drain down this valley." % ["Marsh (generated / cache)" if facts.get("generated", false) else "Tributary", int(items), "+" if facts.get("more", false) else ""]
+		var label = "Tributary"
+		if facts.get("generated", false): label = "Marsh (generated / cache)"
+		elif int(facts.get("subdirs", 0)) >= 6: label = "Canyon (%d subfolders cut deep)" % int(facts.subdirs)
+		var text = "%s: %d%s items drain down this valley." % [label, int(items), "+" if facts.get("more", false) else ""]
+		if facts.get("git", false):
+			var population = str(int(facts.commits)) if numeric(facts.get("commits")) else "unknown"
+			var scaffold = ("%d uncommitted changes under scaffolding" % int(facts.uncommitted)) if int(facts.get("uncommitted", 0)) > 0 else "no scaffolding: all committed"
+			text = "Walled town (git repository): %s commits, %s. %s" % [population, scaffold, text]
 		if int(facts.get("changed_day", 0)) > 0: text += " Rain: %d changed today." % int(facts.changed_day)
 		elif int(facts.get("changed_week", 0)) > 0: text += " %d changed this week." % int(facts.changed_week)
 		return text + " Enter to lift the fog."
 	if kind == "pdf" or (kind == "documents" and numeric(pages) and pages > 0):
 		var r = rock(age)
 		var bulk = ("%d pages set its height." % int(pages)) if numeric(pages) and pages > 0 else "Page count unknown, so the height is neutral."
-		return "%s ridge. %s %s" % [r.name, bulk, when]
+		var form = "ridge"
+		if r.steps > 0:
+			var height = clampf(log(float(pages)+1)/log(2.0)*0.29, 0.45, 3.5)*1.6 if numeric(pages) and pages > 0 else 0.88
+			form = sandstone_form(height)
+		return "%s %s. %s %s" % [r.name, form, bulk, when]
 	match kind:
 		"images":
-			if facts.has("width"): return "Woodland: %d × %d pixels set tree growth%s. %s" % [facts.width, facts.height, ", capture month tints the foliage" if facts.has("captured") else "", when]
+			if facts.has("width"):
+				var giant = "; over 40 megapixels grows a giant sequoia" if float(facts.width)*float(facts.height) >= 40.0e6 else ""
+				return "Woodland: %d × %d pixels set tree growth%s%s. %s" % [facts.width, facts.height, ", capture month tints the foliage" if facts.has("captured") else "", giant, when]
 			return "Woodland, dimensions unknown. " + when
 		"audio":
 			if facts.has("duration"): return "Lake: %s of audio set its area; %d channel ripple%s. %s" % [duration_text(facts.duration), int(facts.get("channels", 0)), "" if int(facts.get("channels", 0)) == 1 else "s", when]
@@ -776,11 +1082,12 @@ static func duration_text(seconds) -> String:
 # ---------------------------------------------------------------- weather
 
 func weather_stats(entries: Array, facts: Dictionary) -> Dictionary:
-	var now = Time.get_unix_time_from_system()
+	var now = now()
 	var s = {"hour":0, "day":0, "week":0, "newest":0.0}
 	for entry in entries:
 		var f = facts.get(entry.path, {})
-		if entry.directory and f.has("items"):
+		if not formed(entry): continue
+		if entry.directory and f.has("items") and epoch <= 0.0:
 			s.hour += int(f.get("changed_hour", 0))
 			s.day += int(f.get("changed_day", 0))
 			s.week += int(f.get("changed_week", 0))
@@ -815,12 +1122,12 @@ static func forecast(s: Dictionary) -> String:
 		"snow": return "Snowbound: untouched for " + ago(s.quiet).trim_suffix(" ago")
 	return "No weather data"
 
-func weather_layer(entries: Array, s: Dictionary, seed_value: int) -> Node3D:
+func weather_layer(entries: Array, s: Dictionary, seed_value: int, reach_override: float = 0.0) -> Node3D:
 	var root = Node3D.new()
 	root.name = "Weather"
 	var random = RandomNumberGenerator.new()
 	random.seed = seed_value
-	var reach = radius(entries)*0.65
+	var reach = reach_override if reach_override > 0.0 else radius(entries)*0.65
 	var drops = []
 	var condition = s.get("condition", "")
 	# Weather must never hide the data: small, translucent, mostly over the margins.

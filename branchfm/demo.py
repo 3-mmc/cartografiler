@@ -43,7 +43,9 @@ def age(path, days):
 
 def create_demo(root: Path):
     root.mkdir(parents=True,exist_ok=True)
-    if (root/'.atlas-demo-v2').exists(): return root
+    if (root/'.atlas-demo-v3').exists():
+        (root/'Expedition log.txt').write_text('Synthetic log, rewritten at every demo launch: a geyser.\n')
+        return root
     for name in ('Northern journey','Coastal journey','Research library','Expedition code'):
         (root/name).mkdir(exist_ok=True)
     (root/'About this landscape.md').write_text('# A synthetic landscape\n\nAll files in this folder are generated demonstration fixtures.\nChoose your own folder using the path bar or Choose folder.\n\nCtrl+P opens Bash navigation. Try: find . -iname "*.pdf"\n\nL cycles labels. Z pulls back. Double-click a directory to enter.\n')
@@ -101,7 +103,51 @@ def create_demo(root: Path):
     for folder in ('Northern journey','Coastal journey'):
         for item in (root/folder).iterdir(): age(item,3000)
         age(root/folder,3000)
-    (root/'.atlas-demo-v2').touch()
+    # Colorado Plateau forms: sandstone-age books of three lengths.
+    canyon = root/'Canyon country'
+    canyon.mkdir(exist_ok=True)
+    for name,pages in (('Plateau survey.pdf',400),('Butte notes.pdf',40),('Hoodoo sketches.pdf',3)):
+        make_pdf(canyon/name,pages)
+        age(canyon/name,500)
+    for i in range(7):  # six or more subfolders cut a canyon
+        (canyon/f'Side canyon {i+1}').mkdir(exist_ok=True)
+        (canyon/f'Side canyon {i+1}'/'notes.md').write_text(f'Synthetic side canyon {i+1}.\n')
+    # A git repository: a walled town with scaffolding for uncommitted work.
+    code = root/'Expedition code'
+    if shutil.which('git') and not (code/'.git').exists():
+        run = lambda *a: subprocess.run(['git','-C',str(code),*a],capture_output=True,check=False)
+        run('init','-q')
+        for i in range(12):
+            (code/'route.py').write_text(f'"""Synthetic route planning sample, revision {i}."""\n\ndef distance(a, b):\n    return sum((x-y)**2 for x, y in zip(a, b)) ** 0.5\n')
+            run('add','route.py','settings.json')
+            run('-c','user.name=Branch demo','-c','user.email=demo@example.invalid','commit','-qm',f'Synthetic revision {i}')
+        (code/'settings.json').write_text('{"climate":"temperate","labels":true,"camera":"orthographic","draft":true}\n')
+    # Symbolic link: a natural arch.
+    link = root/'Shortcut to the library'
+    if not link.exists(): link.symlink_to('Research library')
+    # A giant sequoia: over 40 megapixels.
+    try:
+        from PIL import Image
+        Image.new('RGB',(7000,6000),(70,96,72)).save(root/'Panorama.jpg',quality=60)
+        age(root/'Panorama.jpg',30)
+    except ImportError:
+        pass
+    # An archipelago: more than 120 entries.
+    photos = root/'Photo archive'
+    photos.mkdir(exist_ok=True)
+    try:
+        from PIL import Image
+        for i in range(140):
+            Image.new('RGB',(16,12),(60+i%120,90,80)).save(photos/f'frame-{i:03d}.jpg')
+    except ImportError:
+        pass
+    for i in range(110): (photos/f'caption-{i:03d}.txt').write_text(f'Synthetic caption {i}.\n')
+    for i in range(50): (photos/f'index-{i:02d}.csv').write_text('frame,exposure\n1,0.5\n')
+    for item in photos.iterdir(): age(item,60+hash(item.name)%900)
+    for name in ('High pass.jpg','About this landscape.md','Station log.sqlite','Glacier crossing.mp4'):
+        if (root/name).exists(): age(root/name,2+hash(name)%20)
+    (root/'Expedition log.txt').write_text('Synthetic log, rewritten at every demo launch: a geyser.\n')
+    (root/'.atlas-demo-v3').touch()
     return root
 
 

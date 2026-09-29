@@ -9,8 +9,11 @@ const UI_FONT = preload("res://fonts/Interface.ttf")
 const INK = Color("e6e1cc")
 const MUTED = Color("a9b8ae")
 const GOLD = Color("d9c68f")
-const PAGE = 120
+const PAGE = 600  # entries mapped per page; beyond 120 the region becomes an archipelago
 const ROOT_MOUTH = PI*0.5 + 0.35
+# A child landscape sits just above its parent's ground. Below it, the parent's terrain
+# (magnified by the zoom factor) would bury the child.
+const SEAT = Vector3(0, 0.13, 0)
 const KIND_NAMES = {"pdf":"PDF", "images":"Image", "audio":"Audio", "video":"Video", "tables":"Table", "code":"Source",
 	"archives":"Archive", "binaries":"Executable", "disks":"Disk image", "databases":"Database", "documents":"Document", "other":"File"}
 
@@ -47,6 +50,13 @@ var idle_time = 0.0
 var clock = 0.0
 var lightning_timer = 2.0
 var toast_timer = 0.0
+var time_panel: PanelContainer
+var time_slider: HSlider
+var time_label: Label
+var time_play: Button
+var time_playing = false
+var time_step_timer = 0.0
+var time_debounce: Timer
 
 var map_container: SubViewportContainer
 var viewport: SubViewport
@@ -250,6 +260,7 @@ func _build_ui():
 	button("›_  Bash", tool_row, command_palette, "Bash navigation palette (Ctrl+P)")
 	weather_button = button("☁  Weather", tool_row, toggle_weather, "Show or hide the weather layer (W)")
 	labels_button = button("Aa  All", tool_row, cycle_labels, "Map labels: all / directories / off (L)")
+	button("⏱  Time", tool_row, toggle_time, "Replay last-modified times (Y)")
 	button("?  Legend", tool_row, toggle_legend, "How to read the map (K)")
 	tools.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT, Control.PRESET_MODE_MINSIZE, 16)
 	tools.grow_horizontal = Control.GROW_DIRECTION_BEGIN
@@ -427,6 +438,34 @@ func _build_ui():
 	hover_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hover_label.visible = false
 
+	time_panel = panel(screen_ui, 0.82, 0.6)
+	time_panel.visible = false
+	var time_row = HBoxContainer.new()
+	time_row.add_theme_constant_override("separation", 8)
+	time_panel.add_child(time_row)
+	time_play = button("▶", time_row, func():
+		time_playing = not time_playing
+		time_play.text = "❚❚" if time_playing else "▶"
+		if time_playing and time_slider.value >= time_slider.max_value: time_slider.value = time_slider.min_value, "Play from the oldest change")
+	time_slider = HSlider.new()
+	time_slider.custom_minimum_size = Vector2(520, 0)
+	time_slider.focus_mode = Control.FOCUS_NONE
+	time_slider.value_changed.connect(func(_v):
+		update_time_label()
+		time_debounce.start())
+	time_row.add_child(time_slider)
+	time_label = label("", time_row, 13, GOLD)
+	time_label.custom_minimum_size = Vector2(150, 0)
+	button("Now", time_row, func(): time_slider.value = time_slider.max_value, "Back to the present")
+	time_panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER_BOTTOM, Control.PRESET_MODE_MINSIZE, 64)
+	time_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	time_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	time_debounce = Timer.new()
+	time_debounce.one_shot = true
+	time_debounce.wait_time = 0.2
+	add_child(time_debounce)
+	time_debounce.timeout.connect(apply_epoch)
+
 	dialog = ConfirmationDialog.new()
 	dialog.min_size = Vector2i(480, 150)
 	dialog.theme = ui_theme
@@ -517,7 +556,7 @@ func navigate(path: String, direction: String, page: int = 0, focus: String = ""
 	if loading or moving or path.is_empty(): return
 	loading = true
 	region_info.text = "Surveying " + path + "…"
-	var query = "/list?path="+path.uri_encode()+"&hidden="+str(hidden_files)+"&page="+str(page)
+	var query = "/list?path="+path.uri_encode()+"&hidden="+str(hidden_files)+"&page="+str(page)+"&page_size="+str(PAGE)
 	if not focus.is_empty(): query += "&focus="+focus.uri_encode()
 	if direction == "refresh": query += "&filter="+filter_text.uri_encode()
 	var data = await api(query)
@@ -548,14 +587,15 @@ func navigate(path: String, direction: String, page: int = 0, focus: String = ""
 	var factor = 1.0
 	var parent_key = ""
 	var mouth = ROOT_MOUTH
+	var layout = layout_entries(data.entries)
 	if direction == "child" and regions.has(previous):
 		var parent = regions[previous]
 		var index = -1
 		for i in parent.entries.size():
 			if parent.entries[i].path == path: index = i
 		if index >= 0:
-			local_pos = parent.points[index]+Vector3(0, 0.085, 0)
-			factor = 1.4/terrain.radius(data.entries)
+			local_pos = parent.points[index]+SEAT
+			factor = 1.4/layout.radius
 			parent_key = previous
 			mouth = parent.outlets.get(index, ROOT_MOUTH)
 	elif regions.has(path):
@@ -563,8 +603,8 @@ func navigate(path: String, direction: String, page: int = 0, focus: String = ""
 		factor = regions[path].factor
 		parent_key = regions[path].parent_key
 		mouth = regions[path].mouth
-	var region = {"path":path, "data":data, "entries":data.entries, "points":terrain.positions(data.entries),
-		"radius":terrain.radius(data.entries), "climate":climate_for(path, data), "parent_key":parent_key,
+	var region = {"path":path, "data":data, "entries":data.entries, "points":layout.points, "islands":layout.islands,
+		"radius":layout.radius, "climate":climate_for(path, data), "parent_key":parent_key,
 		"local_pos":local_pos, "factor":factor, "mouth":mouth, "features":[]}
 	if regions.has(path): regions[path].visual.queue_free()
 	regions[path] = region
@@ -574,7 +614,7 @@ func navigate(path: String, direction: String, page: int = 0, focus: String = ""
 			if region.entries[i].path == previous:
 				var child = regions[previous]
 				child.parent_key = path
-				child.local_pos = region.points[i]+Vector3(0, 0.085, 0)
+				child.local_pos = region.points[i]+SEAT
 				child.factor = 1.4/child.radius
 				# The child's outlet now faces the way its tributary flows here.
 				child.mouth = region.outlets.get(i, child.mouth)
@@ -604,27 +644,63 @@ func navigate(path: String, direction: String, page: int = 0, focus: String = ""
 	else:
 		for i in region.entries.size():
 			if region.entries[i].path == focus: select_file(i)
+	if direction in ["child", "root"]: api("/visit", {"source":path})
 	load_metadata(path, request_generation)
+
+func layout_entries(entries: Array) -> Dictionary:
+	# One island for ordinary folders; an archipelago grouped by kind beyond 120 entries.
+	var islands = terrain.archipelago(entries)
+	var points = []
+	points.resize(entries.size())
+	var reach = 0.0
+	for island in islands:
+		var members = island.indices.map(func(i): return entries[i])
+		var local = terrain.positions(members)
+		for j in island.indices.size():
+			points[island.indices[j]] = local[j] + island.centre
+		reach = maxf(reach, island.centre.length() + terrain.radius(members))
+	return {"points":points, "islands":islands, "radius":maxf(reach, terrain.radius([]))}
 
 func build_region(region: Dictionary):
 	var visual = Node3D.new()
 	world.add_child(visual)
 	region.visual = visual
 	var seed_value = hash(region.path)
-	region.channels = terrain.hydrology(region.entries, region.points, metadata_cache, seed_value, region.mouth)
+	region.channels = []
 	region.outlets = {}
-	for channel in region.channels:
-		if channel.index >= 0 and channel.has("angle"): region.outlets[channel.index] = channel.angle
 	region.stats = terrain.weather_stats(region.entries, metadata_cache)
-	visual.add_child(terrain.land(region.entries, region.points, region.climate, seed_value, region.channels, region.stats.snow))
+	var sea = Terrain.flood(region.data.get("filesystem", {}).get("used"))
+	var visits = region.data.get("visits", {})
+	var outward = Vector3(cos(region.mouth), 0, sin(region.mouth)*0.83).normalized()
+	for k in region.islands.size():
+		var island = region.islands[k]
+		var members = island.indices.map(func(i): return region.entries[i])
+		var local = island.indices.map(func(i): return region.points[i] - island.centre)
+		var channels = terrain.hydrology(members, local, metadata_cache, seed_value+k, region.mouth)
+		for channel in channels:
+			if channel.index >= 0:
+				channel.index = island.indices[channel.index]
+				if channel.has("angle"): region.outlets[channel.index] = channel.angle
+		var ground = terrain.land(members, local, region.climate, seed_value+k, channels, region.stats.snow, sea)
+		ground.position = island.centre
+		visual.add_child(ground)
+		region.channels.append_array(channels)
+		# Roads start at the island's gate, where travellers arrive from the parent.
+		var targets = []
+		for i in island.indices:
+			if visits.has(region.entries[i].path) and terrain.formed(region.entries[i]):
+				targets.append([region.points[i], visits[region.entries[i].path]])
+		if not targets.is_empty():
+			terrain.roads(visual, island.centre + outward*terrain.radius(members)*0.72, targets, seed_value+k)
+	var simple = region.islands.size() > 1
 	region.features = []
 	for i in region.entries.size():
 		var entry = region.entries[i]
-		var feature = terrain.feature(entry, metadata_cache.get(entry.path, {}), region.climate)
+		var feature = terrain.feature(entry, metadata_cache.get(entry.path, {}), region.climate, simple)
 		feature.position = region.points[i]
 		visual.add_child(feature)
 		region.features.append(feature)
-	region.weather = terrain.weather_layer(region.entries, region.stats, seed_value)
+	region.weather = terrain.weather_layer(region.entries, region.stats, seed_value, region.radius*0.65)
 	visual.add_child(region.weather)
 
 func apply_transforms():
@@ -684,6 +760,19 @@ func update_cartouche():
 	if climate_override.has(current): climate_text += "override (T)"
 	else: climate_text += "%s (%s)" % [Terrain.CLIMATE_REASON[r.climate], fs.get("type", "?")]
 	var text = climate_text + "\n" + Terrain.forecast(r.stats)
+	if Terrain.numeric(fs.get("used")):
+		text += "\nSea level: disk %d%% full, %s free%s" % [int(fs.used*100), human_bytes(fs.get("free", 0)), ". The coast is flooding" if fs.used >= 0.75 else ""]
+	if r.data.has("cloud"):
+		var counts = {"cloud":0, "pinned":0, "local":0}
+		for entry in r.entries:
+			if counts.has(entry.get("tide", "")): counts[entry.tide] += 1
+		text += "\n%s: %d phantom island%s (cloud-only) · %d diked (pinned) · %d tidal flat%s" % [r.data.cloud.provider, counts.cloud, "" if counts.cloud == 1 else "s", counts.pinned, counts.local, "" if counts.local == 1 else "s"]
+	if r.data.has("git") and Terrain.numeric(r.data.git.get("commits")):
+		text += "\nWalled town: %d commits, %d uncommitted" % [int(r.data.git.commits), int(r.data.git.get("uncommitted", 0))]
+	if r.islands.size() > 1:
+		text += "\nArchipelago: %d islands grouped by kind" % r.islands.size()
+	if terrain.epoch > 0.0:
+		text += "\nAs of %s: replaying last-modified times" % Time.get_date_string_from_unix_time(int(terrain.epoch))
 	if r.data.pages > 1:
 		text += "\nShowing %d–%d of %d entries · Gazetteer (G) pages the rest" % [r.data.page*PAGE+1, mini((r.data.page+1)*PAGE, r.data.total), r.data.total]
 	region_info.text = text
@@ -703,6 +792,13 @@ func update_cartouche():
 		crumb.add_theme_font_size_override("font_size", 12)
 	button("✎", crumbs, show_path_field, "Type a path (Ctrl+L)").add_theme_font_size_override("font_size", 12)
 	cartouche.reset_size()
+
+static func human_bytes(value) -> String:
+	var n = float(value)
+	for unit in ["B", "KB", "MB", "GB", "TB"]:
+		if n < 1024.0 or unit == "TB": return ("%.0f %s" if n >= 10 or unit == "B" else "%.1f %s") % [n, unit]
+		n /= 1024.0
+	return ""
 
 func update_listing():
 	var r = regions[current]
@@ -795,6 +891,7 @@ func focus_selected():
 
 func load_metadata(path: String, generation: int):
 	var region = regions[path]
+	if region.islands.size() > 1: return  # archipelago glyphs don't use per-file metadata
 	for i in region.entries.size():
 		if generation != request_generation: return
 		var entry = region.entries[i]
@@ -832,6 +929,19 @@ func _rebuild_labels():
 		title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		overlay.add_child(title)
 		labels.append({"widget":title, "point":transform.pos+Vector3(0, 0.1, -r.radius*0.78)*transform.scale, "scale":r.radius*transform.scale, "region":true, "key":key, "index":-1})
+		for island in r.islands:
+			if island.name.is_empty(): continue
+			var tag = Label.new()
+			tag.text = island.name
+			tag.add_theme_font_override("font", ITALIC)
+			tag.add_theme_font_size_override("font_size", 16)
+			tag.add_theme_color_override("font_color", Color("d9c68f"))
+			tag.add_theme_color_override("font_shadow_color", Color("19393a"))
+			tag.add_theme_constant_override("shadow_offset_x", 1)
+			tag.add_theme_constant_override("shadow_offset_y", 1)
+			tag.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			overlay.add_child(tag)
+			labels.append({"widget":tag, "point":transform.pos+(island.centre+Vector3(0, 0.1, -island.r*0.72))*transform.scale, "scale":island.r*transform.scale*2.2, "region":true, "key":key, "index":-2})
 		for i in r.entries.size():
 			var entry = r.entries[i]
 			var item = Label.new()
@@ -849,7 +959,7 @@ func _rebuild_labels():
 func position_labels():
 	# Visible overlays count as occupied, so map names never bleed through the glass.
 	var occupied = []
-	for node in [cartouche, tools, zoom_box, gazetteer, notes, legend, toast, carry]:
+	for node in [cartouche, tools, zoom_box, gazetteer, notes, legend, toast, carry, time_panel]:
 		if node.visible: occupied.append(node.get_global_rect().grow(6))
 	var ordered = labels.duplicate()
 	ordered.sort_custom(func(a, b):
@@ -862,6 +972,7 @@ func position_labels():
 		widget.add_theme_color_override("font_color", Color("f3d391") if data.key == current and data.index == selected else Color("e4e0ce"))
 		if label_mode == 2: continue
 		if label_mode == 1 and not data.region and not data.get("directory", false): continue
+		if data.index >= 0 and not terrain.formed(regions[data.key].entries[data.index]): continue
 		var projected = data.scale/camera.size*viewport.size.y
 		if projected < (80 if data.region else 17): continue
 		if camera.is_position_behind(data.point): continue
@@ -903,6 +1014,14 @@ func _process(delta):
 		var hovered = node.get_global_rect().has_point(mouse)
 		var target = 1.0 if idle_time < 2.5 or hovered or dialog.visible else fading[node]
 		node.modulate.a = lerpf(node.modulate.a, target, 1-exp(-delta*(8.0 if target > node.modulate.a else 2.5)))
+	if time_playing:
+		time_step_timer -= delta
+		if time_step_timer <= 0.0:
+			time_step_timer = 0.4
+			time_slider.value = minf(time_slider.max_value, time_slider.value + (time_slider.max_value-time_slider.min_value)/30.0)
+			if time_slider.value >= time_slider.max_value:
+				time_playing = false
+				time_play.text = "▶"
 	if toast.visible:
 		toast_timer -= delta
 		if toast_timer < 0.6: toast.modulate.a = maxf(0.0, toast_timer/0.6)
@@ -913,8 +1032,15 @@ func animate_weather(delta: float):
 	var r = regions[current]
 	if not is_instance_valid(r.visual): return
 	var layers = [r.weather] if r.weather.visible else []
-	for feature in r.features:
-		if is_instance_valid(feature) and feature.visible and feature.has_meta("drops"): layers.append(feature)
+	for i in r.features.size():
+		var feature = r.features[i]
+		if not is_instance_valid(feature) or not feature.visible: continue
+		if feature.has_meta("drops"): layers.append(feature)
+		if feature.has_meta("geyser"):
+			# Old Faithful rhythm: quiet, then a burst.
+			var burst = maxf(0.0, sin(clock*0.9 + i*1.7))
+			var plume = feature.get_meta("geyser")
+			plume.scale = Vector3(1, 0.15 + 1.6*pow(burst, 3.0), 1)
 	for layer in layers:
 		var top = float(layer.get_meta("top", 3.0))
 		var speed = 0.8 if layer.get_meta("snow", false) else 5.5
@@ -983,6 +1109,7 @@ func nearest_landmark(point: Vector2) -> int:
 	var best = -1
 	var distance = 44.0
 	for i in regions[current].points.size():
+		if not terrain.formed(regions[current].entries[i]): continue
 		var pos = camera.unproject_position(regions[current].points[i]+Vector3(0, 0.3, 0))
 		var d = pos.distance_to(point)
 		if d < distance: best = i; distance = d
@@ -1014,6 +1141,7 @@ func _unhandled_key_input(event):
 		KEY_K, KEY_QUESTION: toggle_legend()
 		KEY_SLASH: if event.shift_pressed: toggle_legend()
 		KEY_W: toggle_weather()
+		KEY_Y: toggle_time()
 		KEY_L: cycle_labels()
 		KEY_Z: overview()
 		KEY_T: cycle_climate()
@@ -1037,6 +1165,7 @@ func step_selection(direction: int):
 func escape():
 	if path_field.visible: hide_path_field()
 	elif legend.visible: toggle_legend()
+	elif time_panel.visible: toggle_time()
 	elif gazetteer.visible: toggle_gazetteer()
 	elif notes.visible: deselect()
 	elif chrome_hidden: toggle_chrome()
@@ -1084,6 +1213,46 @@ func toggle_legend():
 	legend.modulate.a = 1.0
 	if legend.visible: fill_legend()
 
+func toggle_time():
+	if not regions.has(current): return
+	time_panel.visible = not time_panel.visible
+	time_panel.modulate.a = 1.0
+	if time_panel.visible:
+		var oldest = Time.get_unix_time_from_system()
+		for entry in regions[current].entries:
+			var modified = float(entry.get("modified", 0))
+			if modified > 0.0 and not entry.directory: oldest = minf(oldest, modified)
+		time_slider.min_value = oldest - 86400.0
+		time_slider.max_value = Time.get_unix_time_from_system()
+		time_slider.step = maxf(60.0, (time_slider.max_value-time_slider.min_value)/2000.0)
+		time_slider.set_value_no_signal(time_slider.max_value)
+		update_time_label()
+		notify("Replaying last-modified times: a file appears at its most recent change, not its creation.", false, 6)
+	else:
+		time_playing = false
+		time_play.text = "▶"
+		if terrain.epoch > 0.0:
+			terrain.epoch = 0.0
+			rebuild_current()
+
+func update_time_label():
+	var at_now = time_slider.value >= time_slider.max_value - time_slider.step
+	time_label.text = "Now" if at_now else Time.get_date_string_from_unix_time(int(time_slider.value))
+
+func apply_epoch():
+	var at_now = time_slider.value >= time_slider.max_value - time_slider.step
+	terrain.epoch = 0.0 if at_now else time_slider.value
+	rebuild_current()
+
+func rebuild_current():
+	if not regions.has(current): return
+	var r = regions[current]
+	r.visual.queue_free()
+	build_region(r)
+	apply_transforms()
+	update_cartouche()
+	if selected >= 0 and not terrain.formed(r.entries[selected]): deselect()
+
 func toggle_weather():
 	weather_visible = not weather_visible
 	weather_button.text = "☁  Weather" if weather_visible else "☁  Off"
@@ -1125,22 +1294,30 @@ Temperate: Linux-native (ext4). Tropical: Windows volumes over WSL's 9p bridge. 
 [color=#d9c68f][b]Hydrology: how it's organised[/b][/color]
 Water always flows [b]toward the parent directory[/b]; the river mouth faces [code]..[/code]
 Subdirectories are tributaries, wider when they hold more. Empty directories are dry riverbeds. Generated or cache directories (node_modules, .venv, build…) are marshes.
+Folders with six or more subfolders cut [b]canyons[/b] with banded walls.
 Lakes = audio (duration → area). Waterfalls = video (duration → height). Glaciers = archives (entries → length, compression → blue ice); meltwater is extraction.
+[b]Sea level[/b] is disk usage: past 75% full the coast begins to flood.
+[b]Tides[/b] (OneDrive, Proton Drive…): cloud-only files are ghostly [b]phantom islands[/b]; pinned files sit behind a [b]dike[/b]; downloaded-but-reclaimable ones on a [b]tidal flat[/b]. A lighthouse marks a sync root.
 
 [color=#d9c68f][b]Geology: what it is and how old[/b][/color]
 Documents with pages are mountains; pages set the height. Rock is age since last change:
-[b]fresh basalt[/b] (black, sharp; glowing if changed today) → [b]weathered basalt[/b] (< 6 months) → [b]sandstone[/b] terraces (< 3 years) → [b]granite[/b] (pale, low, rounded).
-Images: woodland. Tables: fields. Source: settlements. Executables: obsidian. Disk images: calderas. Databases: wells. Other documents: meadows. Symlinks: signposts. Unknown: cairns.
+[b]fresh basalt[/b] (black, sharp; glowing if changed today) → [b]weathered basalt[/b] (< 6 months) → [b]sandstone[/b] (< 3 years: mesas, buttes, or hoodoos as length shrinks) → [b]granite[/b] (pale, low, rounded).
+Images: woodland (a giant sequoia past 40 megapixels). Tables: fields. Source: settlements. Executables: obsidian. Disk images: calderas. Databases: wells. Other documents: meadows. Symlinks: natural arches. Unknown: cairns.
+A [b]geyser[/b] erupts beside any file changed in the last 15 minutes.
+
+[color=#d9c68f][b]Human geography: where people act[/b][/color]
+[b]Roads[/b] are worn by your own visits (entering folders, opening files) and widen with use. Git repositories are [b]walled towns[/b]: commits are population, uncommitted changes scaffolding.
+Folders over 120 entries become an [b]archipelago[/b]: islands grouped by kind, drawn as simple glyphs.
 
 [color=#d9c68f][b]Weather: what's happening now[/b][/color]
 Thunderstorm: many changes this hour or today. Showers: changes today. Cumulus: this week. Clear: this season. Snow: untouched for more than two years. Fog hides unexplored folders until you enter them.
 
 [color=#d9c68f][b]Keys[/b][/color]
 Click select · double-click / Enter enter · Backspace up · right-drag pan · wheel zoom · Z overview
-G gazetteer · Ctrl+P Bash · Ctrl+L type a path · W weather · L labels · F map only · I collapse notes
+G gazetteer · Ctrl+P Bash · Ctrl+L type a path · W weather · Y time · L labels · F map only · I collapse notes
 Space peek · F2 rename · Delete trash · Ctrl+C / X / V copy, cut, paste · Ctrl+Z undo · Ctrl+Shift+N new folder
 
-[i]Unknown metadata is drawn neutral, never invented. Up to 120 entries are mapped per page.[/i]"""
+[i]Unknown metadata is drawn neutral, never invented. Up to 600 entries are mapped per page; the time slider replays last-modified times, not creation.[/i]"""
 
 func change_page(direction: int):
 	if not regions.has(current): return
@@ -1291,6 +1468,7 @@ func choose_folder():
 func peek():
 	var entry = selected_entry()
 	if entry.is_empty(): return
+	api("/visit", {"source":entry.path})
 	var popup = AcceptDialog.new()
 	popup.title = entry.name
 	popup.min_size = Vector2i(760, 560)
@@ -1349,7 +1527,9 @@ func operate(action: String):
 	if action != "undo" and entry.is_empty(): return
 	var result = await api("/operation", {"action":action, "source":entry.get("path", current)})
 	if result.has("error"): notify(result.error)
-	elif action == "open": notify("Opening "+entry.name+" externally.", false, 3)
+	elif action == "open":
+		api("/visit", {"source":entry.path})
+		notify("Opening "+entry.name+" externally.", false, 3)
 	else:
 		navigate(current, "refresh", regions[current].data.page)
 		if action == "undo": notify("Undone.", false, 3)
@@ -1435,6 +1615,17 @@ func _smoke_test():
 	desired_center = Vector3.ZERO
 	desired_size = r.radius*2.6
 	var args = OS.get_cmdline_user_args()
+	var enter_name = args[args.find("--enter")+1] if args.find("--enter") >= 0 and args.find("--enter")+1 < args.size() else ""
+	if not enter_name.is_empty():
+		await navigate(current.trim_suffix("/")+"/"+enter_name, "child")
+		r = regions[current]
+		desired_center = Vector3.ZERO
+		desired_size = r.radius*2.6
+	if "--time" in args:
+		toggle_time()
+		time_slider.value = lerpf(time_slider.min_value, time_slider.max_value, 0.55)
+		await get_tree().create_timer(0.6).timeout
+		r = regions[current]
 	var focus_name = args[args.find("--focus")+1] if args.find("--focus") >= 0 and args.find("--focus")+1 < args.size() else ""
 	for i in r.entries.size():
 		if (focus_name.is_empty() and r.entries[i].kind == "pdf") or r.entries[i].name == focus_name:
