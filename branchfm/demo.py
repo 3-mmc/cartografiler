@@ -1,6 +1,10 @@
 """Small, explicitly synthetic fixtures for trying the atlas without personal data."""
 from pathlib import Path
 import math
+import os
+import shutil
+import subprocess
+import time
 import struct
 import wave
 import zipfile
@@ -28,9 +32,18 @@ def make_pdf(path, pages):
     path.write_bytes(document)
 
 
+DAY = 86400
+
+
+def age(path, days):
+    """Backdate a fixture so the map shows every rock age, basalt to granite."""
+    stamp = time.time()-days*DAY
+    os.utime(path,(stamp,stamp))
+
+
 def create_demo(root: Path):
     root.mkdir(parents=True,exist_ok=True)
-    if (root/'About this landscape.md').exists(): return root
+    if (root/'.atlas-demo-v2').exists(): return root
     for name in ('Northern journey','Coastal journey','Research library','Expedition code'):
         (root/name).mkdir(exist_ok=True)
     (root/'About this landscape.md').write_text('# A synthetic landscape\n\nAll files in this folder are generated demonstration fixtures.\nChoose your own folder using the path bar or Choose folder.\n\nCtrl+P opens Bash navigation. Try: find . -iname "*.pdf"\n\nL cycles labels. Z pulls back. Double-click a directory to enter.\n')
@@ -65,6 +78,30 @@ def create_demo(root: Path):
             image.save(folder/name,quality=82,exif=exif)
     except ImportError:
         pass
+    # Landforms added with the cartographic grammar (docs/cartography.md).
+    (root/'Empty survey').mkdir(exist_ok=True)
+    modules = root/'Expedition code'/'node_modules'
+    (modules/'left-pad').mkdir(parents=True,exist_ok=True)
+    (modules/'left-pad'/'index.js').write_text('// synthetic fixture\nmodule.exports = s => s;\n')
+    (root/'Expedition code'/'route-planner.exe').write_bytes(b'MZ'+b'\0'*60+b'synthetic fixture, not a program'+b'\0'*300000)
+    (root/'Station log.sqlite').write_bytes(b'SQLite format 3\0'+b'\0'*8176)
+    with open(root/'Survey machine.vhdx','wb') as disk:
+        disk.truncate(3*1024**3)  # sparse: occupies almost no space
+    with zipfile.ZipFile(root/'Research library'/'Field recordings.zip','w',zipfile.ZIP_DEFLATED) as archive:
+        for i in range(40):
+            archive.writestr(f'transcripts/day-{i:02d}.txt',('Synthetic transcript line.\n'*200))
+    if shutil.which('ffmpeg'):
+        subprocess.run(['ffmpeg','-v','quiet','-y','-f','lavfi','-i','testsrc=size=1920x1080:rate=10:duration=150',
+                        '-c:v','libx264','-preset','ultrafast','-crf','40',str(root/'Glacier crossing.mp4')],check=False,timeout=120)
+    for name,days in (('Collected journeys.pdf',1900),('Mountain atlas.pdf',520),('Field guide.pdf',0.2),
+                      ('Expedition archive.zip',800),('Mountain spring.wav',3),('Survey machine.vhdx',400),
+                      ('Research library/Monograph.pdf',2400),('Research library/Short paper.pdf',40),
+                      ('Weather observations.csv',0.5),('River bend.jpg',9),('Autumn forest.jpg',300)):
+        if (root/name).exists(): age(root/name,days)
+    for folder in ('Northern journey','Coastal journey'):
+        for item in (root/folder).iterdir(): age(item,3000)
+        age(root/folder,3000)
+    (root/'.atlas-demo-v2').touch()
     return root
 
 

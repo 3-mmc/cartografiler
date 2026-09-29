@@ -28,11 +28,12 @@
 - **Do not build a regular board of equal-sized hex/square tiles.** The user corrected the first prototype: geography should be amorphous, expansive, less cartoonish, and visually informed by **Mach Speed Intercept Playtest's map view**. Civilization V supplied the earlier strategic-camera reference, not a requirement for hex tiles.
 - The reference is installed at `E:\SteamLibrary\steamapps\common\Mach Speed Intercept Playtest` (`/mnt/e/SteamLibrary/steamapps/common/Mach Speed Intercept Playtest`), Steam app `3989450`. Official screenshots are on the parent game's page, https://store.steampowered.com/app/3438610/Mach_Speed_Intercept/ . Inspect broad continuous terrain, irregular ridges, muted materials, free camera movement; do not lift game assets.
 - Directory hierarchy determines geography. Deeper paths are nested regions; entering pans and zooms into existing geography, backing out restores the surroundings. Preserve explored siblings rather than replacing the map with an unrelated island.
-- Climates rotate among directory regions; forests may become pine, tropical, desert vegetation, or wetland. Climate is illustrative and must not be presented as inferred real-world geography.
-- File metadata modifies bounded landmark characteristics: PDF pages → mountain elevation, image dimensions/orientation/EXIF date → vegetation, media duration/resolution/channels → water features, table rows/columns → fields. Missing metadata must remain unknown, never invented.
+- **The cartographic grammar is in `docs/cartography.md` and is the design contract.** Each system answers one question: climate = mount/filesystem (and write permission), hydrology = directory tree (water flows toward the parent), geology = file type + age (basalt when fresh → granite when old), weather = recent modification activity. Do not let one system borrow another's meaning. Climate is a filesystem fact, never a claim about real-world geography; `T` is a session-only override.
+- File metadata modifies bounded landmark characteristics (see the grammar's tables). Missing metadata must remain unknown and be drawn neutral, never invented.
+- **The map is the application.** No permanent panels: cartouche, tools, gazetteer, field notes and legend are translucent overlays that appear when relevant and fade when idle (accepted 2026-09-28).
 - File/directory names form a cartographic label layer, with all / directories-only / off toggles, zoom-dependent density and collision suppression. The inspector always exposes the real full name.
 - **Ctrl+P** opens an explicitly submitted Bash navigation palette. `cd`, `find`, and pipelines yielding paths drive an animated zoom-out / travel / zoom-in journey. Bash runs as the user; it is not a fake command parser. Never execute palette text automatically while it is being typed.
-- Preview follows selection; Space enlarges it. Keep a conventional file list and path navigation alongside the map.
+- Preview follows selection (field notes appear only while something is selected); Space enlarges it. The conventional list lives in the collapsible Gazetteer (G); path typing via Ctrl+L or the cartouche trail.
 
 ## Validation and constraints
 
@@ -41,7 +42,12 @@ python3 -m unittest discover -s tests -v
 ./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --editor --import --quit
 ./atlas demo --headless --smoke
 ./atlas demo --smoke --capture /tmp/branch-atlas.png
+./atlas demo --smoke --capture /tmp/x.png --focus 'Glacier crossing.mp4'   # close-up of one landform
 ```
+
+- A GDScript parse error makes the smoke run hang (its timeout timer lives in the failed script): always wrap it in `timeout` and grep for `SCRIPT ERROR`.
+- `ERR_CANT_OPEN` from `audio_driver_alsa` in windowed runs is WSLg having no ALSA device; pre-existing and harmless.
+- The demo generator is versioned by `demo/.atlas-demo-v2`; delete `demo/` to regenerate after changing it.
 
 - Sandboxed tools cannot create loopback sockets here; integrated app tests require sandbox escalation. Read-only headless import can emit socket warnings unrelated to script parsing.
 - Preview/metadata workers are bounded subprocesses. Never execute a file's contents to preview it.

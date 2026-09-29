@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 import hashlib
 import json
 import csv
@@ -23,7 +24,10 @@ BIOMES = [
     ('video', 'Waterfalls · video', 3),
     ('tables', 'Farmland · tables', 6),
     ('code', 'Settlements · source code', 5),
-    ('archives', 'Vaults · archives', 4),
+    ('archives', 'Glaciers · archives', 4),
+    ('binaries', 'Obsidian · executables', 4),
+    ('disks', 'Calderas · disk images', 4),
+    ('databases', 'Wells · databases', 1),
     ('documents', 'Meadows · documents', 2),
     ('other', 'Uncharted · other files', 4),
 ]
@@ -46,9 +50,15 @@ def biome(path):
         return 'tables'
     if ext in SOURCE or path.name in {'Makefile','Dockerfile'}:
         return 'code'
-    if ext in {'.zip','.tar','.gz','.bz2','.xz','.7z','.rar'}:
+    if ext in {'.zip','.tar','.gz','.tgz','.bz2','.xz','.7z','.rar','.zst','.jar','.whl'}:
         return 'archives'
-    if ext in {'.md','.txt','.rst','.docx','.odt','.epub','.rtf','.pptx'}:
+    if ext in {'.exe','.dll','.so','.o','.a','.lib','.pyc','.class','.wasm','.msi','.sys','.dylib','.bin','.elf'}:
+        return 'binaries'
+    if ext in {'.iso','.img','.vhd','.vhdx','.vmdk','.qcow2','.vdi','.dmg'}:
+        return 'disks'
+    if ext in {'.db','.sqlite','.sqlite3','.mdb','.accdb','.duckdb','.ldb'}:
+        return 'databases'
+    if ext in {'.md','.txt','.rst','.doc','.docx','.odt','.epub','.rtf','.pptx','.ppt','.odp','.tex'}:
         return 'documents'
     return 'other'
 
@@ -114,7 +124,10 @@ def terrain(kind, facts=None, weather='temperate'):
         'video': ['    ≈≈╮','      ╰≈≈╮','   ╭≈≈≈≈╯','   ╰≈≈≈≈≈≈≈'],
         'tables': ['   ╱┬─┬─┬─╱','  ╱─┼─┼─┼╱',' ╱──┼─┼─╱',' ────────'],
         'code': ['    ⌂    ⌂','  ╱─╲  ╱──╲','  │·│──│··│','  ┴─┴··┴──┴'],
-        'archives': ['    ▄▄▄▄▄','  ╱███████╲','  │██ ▣ ██│','  └───────┘'],
+        'archives': ['    ▄▄▄▄▄','  ╱▒▒▒▒▒▒▒╲','  │▒▒ ░ ▒▒│','  └~~~~~~~┘'],
+        'binaries': ['    ▲  ▲','   ▐█▌▐█▌ ▲','   ▐█▌▐█▌▐█▌','  ─┴─┴┴─┴┴─┴─'],
+        'disks': ['    .───.','  /  ~~~  \\','  \\  ~~~  /','    `───´'],
+        'databases': ['     ___','    (   )','    |≈≈≈|','    `───´'],
         'documents': ['       ,','  ,  · │   ,','  │  , │ · │',' ─┴──┴─┴───┴─'],
         'other': ['     . · .','   ·   ?   ·','     · . ·','  · · · · · ·'],
     }[kind]
@@ -173,9 +186,84 @@ def page_count(path):
     return None
 
 
+# Generated or cache trees: rendered as marsh rather than clear tributaries.
+GENERATED = {'node_modules','__pycache__','.cache','cache','build','dist','target','.venv','venv','.git',
+             '.tox','.mypy_cache','.pytest_cache','.gradle','.next','tmp','temp','.parcel-cache','obj'}
+
+
+def directory_facts(path, count_limit=5000, stat_limit=400):
+    """Shallow survey of one directory: size of the tributary and its weather."""
+    now = time.time()
+    facts = {'items':0,'changed_hour':0,'changed_day':0,'changed_week':0,'newest':0.0}
+    try:
+        with os.scandir(path) as scan:
+            for entry in scan:
+                facts['items'] += 1
+                if facts['items']>=count_limit:
+                    facts['more'] = True
+                    break
+                if facts['items']>stat_limit:
+                    continue
+                try:
+                    modified = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                facts['newest'] = max(facts['newest'],modified)
+                age = now-modified
+                facts['changed_hour'] += age<3600
+                facts['changed_day'] += age<86400
+                facts['changed_week'] += age<7*86400
+    except PermissionError:
+        return {'readable':False}
+    facts['generated'] = path.name in GENERATED
+    return facts
+
+
+def archive_facts(path, limit=20000):
+    """Entry count and compression ratio from the archive index; nothing is extracted."""
+    import tarfile
+    import zipfile
+    name = path.name.lower()
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()[:limit]
+            unpacked = sum(i.file_size for i in infos)
+            packed = sum(i.compress_size for i in infos)
+            return {'entries':len(infos),'unpacked':unpacked,'ratio':round(packed/unpacked,4) if unpacked else None}
+    if name.endswith(('.tar','.tar.gz','.tgz','.tar.bz2','.tar.xz')):
+        entries = unpacked = 0
+        with tarfile.open(path) as archive:
+            for member in archive:
+                entries += 1
+                unpacked += member.size
+                if entries>=limit: break
+        return {'entries':entries,'unpacked':unpacked,'ratio':round(path.stat().st_size/unpacked,4) if unpacked else None}
+    return {}
+
+
+def office_pages(path):
+    """DOCX/PPTX record page or slide counts in docProps/app.xml when the author's app saved them."""
+    import re
+    import zipfile
+    with zipfile.ZipFile(path) as archive:
+        try:
+            text = archive.read('docProps/app.xml')[:65536].decode('utf-8','replace')
+        except KeyError:
+            return None
+    match = re.search(r'<(?:\w+:)?(?:Pages|Slides)>(\d+)<',text)
+    return int(match.group(1)) if match else None
+
+
 def metadata(path):
     kind = biome(path)
     facts = {}
+    if kind=='folders':
+        return directory_facts(path)
+    if kind=='archives':
+        return archive_facts(path)
+    if path.suffix.lower() in ('.docx','.pptx'):
+        pages = office_pages(path)
+        return {'pages':pages} if pages else {}
     if kind=='pdf':
         facts['pages'] = page_count(path)
     elif kind=='images':

@@ -23,23 +23,19 @@ python3 -m branchfm.demo
 
 The lightweight terminal companion is `./branch /path`. Press `?` there for controls; `m` opens that directory in the native atlas.
 
-## Navigate
+## The map is the application
+
+There are no permanent panels. A **cartouche** (top left) names the region, gives the path as a trail of place names, and states its climate and weather. **Field notes** (right) appear when you select something: a preview, the facts, and a *reading* explaining why the landform looks as it does. The **Gazetteer** (`G`) holds the conventional list, filter and paging. Paste and Undo appear only when they apply. Chrome fades while the mouse rests; `F` hides everything but the map.
 
 | Control | Action |
 |---|---|
-| Click a landmark / file-list row | Select and preview |
-| Double-click a directory / Enter | Pan and zoom into its landscape |
-| Backspace / Parent | Return to the parent landscape |
-| Right or middle drag | Pan |
-| Wheel / + / − | Zoom |
+| Click / double-click / Enter | Select · enter a directory (or peek a file) |
+| Backspace · ↑ in the cartouche | Up to the parent region |
+| Right or middle drag · wheel · + / − | Pan · zoom |
 | Z | Parent overview / local view |
-| L | All names / directory names / no map labels |
-| T | Cycle the active directory's climate |
-| F | Expand map; press again to restore list and inspector |
-| Space | Large preview |
-| Ctrl+P | Bash navigation palette |
-
-The path bar accepts Linux paths or Windows drive paths such as `E:\Photos`. Files remain selectable through the list even if a map label is suppressed to avoid overlap. The inspector always contains the full name.
+| G or Tab · K or ? · W · L · T · F · I | Gazetteer · legend · weather · labels · climate override · map only · collapse notes |
+| Ctrl+P · Ctrl+L | Bash navigation palette · type a path |
+| Space · F2 · Delete · Ctrl+C/X/V · Ctrl+Z · Ctrl+Shift+N | Peek · rename · trash · copy/cut/paste · undo · new folder |
 
 ## Bash navigation
 
@@ -57,22 +53,14 @@ Commands have a 10-second limit, output is limited to 1 MiB, and results to 200 
 
 ## Reading the map
 
-Directory ancestry creates nested geography. Unvisited directories are survey markers; entering reveals a real miniature landscape in that place, then approaches it. Visited parents and siblings are kept, with two ancestor levels rendered around the current region. Deeper history reappears when returning. Explicit **Go** / **Choose folder** starts a new map.
+The full grammar, with the reasoning behind each choice, is in **[docs/cartography.md](docs/cartography.md)** and in the in-app legend (`K`). In short:
 
-Climates rotate across siblings and can be cycled manually. Coastlines and climates are illustrative, not inferred geographic locations. Rivers trace directory branches; leaf landscapes also have decorative coastal streams.
+- **Climate is the mount.** Linux-native = temperate, Windows volumes over 9p = tropical, network = wetland, tmpfs/proc = desert, not writable = alpine.
+- **Water flows toward the parent.** Subdirectories are tributaries sized by their item count. Empty folders are dry riverbeds, and cache/generated folders are marshes. Audio are lakes, video waterfalls, and archives glaciers (entries → length, compression → blue ice).
+- **Landform is file type; rock is age.** Paged documents are mountains. Fresh basalt (black, sharp, glowing if changed today) weathers to sandstone terraces and finally worn granite. Images are woodland, tables fields, source settlements, executables obsidian, disk images calderas, and databases wells.
+- **Weather is recent activity.** Storms, showers and cumulus for changes this hour, today or this week. Snow for regions untouched for over two years. Fog over unexplored folders.
 
-| File | Landmark | Metadata variations |
-|---|---|---|
-| PDF | Irregular ridge | Page count controls bounded logarithmic elevation |
-| Images | Vegetation patch | Pixel count controls growth; orientation changes shape/density; EXIF capture month accents foliage |
-| Audio | Irregular lake | Duration changes area; channel count adds ripples |
-| Video | Waterfall | Duration changes height; resolution changes width |
-| CSV / TSV | Fields | Rows affect area; columns create furrows |
-| Source / configuration | Settlement | Type-based representation |
-| ZIP / archives | Vault | Type-based representation |
-| Text / other documents | Meadow | Type-based representation |
-
-Missing metadata uses a neutral landmark; exact known values appear in the inspector. Capture-month accents do not claim to know the hemisphere or actual season. Spreadsheet workbooks receive a field landmark but native Excel row/column metadata is not yet used to size it.
+Directory ancestry creates nested geography. Entering a folder follows its tributary upstream into a real miniature landscape; visited parents and siblings are kept.
 
 ## Previews and file operations
 

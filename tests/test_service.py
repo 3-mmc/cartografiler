@@ -56,6 +56,14 @@ class ServiceTests(unittest.TestCase):
         result = self.request('/command',{'source':str(self.root),'command':"printf '%s\\n' file-124.txt"})
         self.assertEqual(result['results'][0]['path'],str(self.root/'file-124.txt'))
 
+    def test_survey_and_filesystem_facts(self):
+        (self.root/'sub').mkdir()
+        (self.root/'sub'/'a.txt').write_text('a')
+        result = self.request('/survey',{'paths':[str(self.root/'sub'),str(self.root/'file-000.txt')]})
+        self.assertEqual(result['facts'][str(self.root/'sub')]['items'],1)
+        self.assertNotIn(str(self.root/'file-000.txt'),result['facts'])
+        self.assertIn('zone',self.request('/list')['filesystem'])
+
     def test_explicit_destination_can_reveal_hidden_file(self):
         from urllib.parse import urlencode
         result = self.request('/list?'+urlencode({'focus':str(self.root/'.hidden')}))

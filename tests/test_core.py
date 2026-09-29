@@ -94,6 +94,53 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn('\x1b',clean('\x1b[31m恶意.txt'))
         self.assertIn('恶意',clean('恶意.txt'))
 
+    def test_directory_facts_measure_tributary_and_weather(self):
+        folder = self.root/'node_modules'
+        folder.mkdir()
+        for i in range(3): (folder/str(i)).touch()
+        old = folder/'old'
+        old.touch()
+        os.utime(old,(0,0))
+        facts = metadata(folder)
+        self.assertEqual(facts['items'],4)
+        self.assertEqual(facts['changed_day'],3)
+        self.assertTrue(facts['generated'])
+        self.assertEqual(metadata(self.root/'node_modules'/'..'/'node_modules')['items'],4)
+
+    def test_archive_is_a_glacier_with_real_index_counts(self):
+        import zipfile
+        from branchfm.atlas import biome
+        path = self.root/'bundle.zip'
+        with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr('a.txt','a'*5000)
+            archive.writestr('b/c.txt','hello')
+        facts = metadata(path)
+        self.assertEqual(biome(path),'archives')
+        self.assertEqual(facts['entries'],2)
+        self.assertEqual(facts['unpacked'],5005)
+        self.assertLess(facts['ratio'],0.2)
+        self.assertEqual(biome(self.root/'disk.vhdx'),'disks')
+        self.assertEqual(biome(self.root/'tool.exe'),'binaries')
+        self.assertEqual(biome(self.root/'store.sqlite'),'databases')
+        for kind in ('archives','binaries','disks','databases'):
+            self.assertTrue(terrain(kind))
+
+    def test_docx_page_count_is_read_not_invented(self):
+        import zipfile
+        path = self.root/'report.docx'
+        with zipfile.ZipFile(path,'w') as archive:
+            archive.writestr('docProps/app.xml','<Properties><Pages>42</Pages></Properties>')
+        self.assertEqual(metadata(path),{'pages':42})
+        with zipfile.ZipFile(self.root/'blank.docx','w') as archive:
+            archive.writestr('word/document.xml','<w:document/>')
+        self.assertEqual(metadata(self.root/'blank.docx'),{})
+
+    def test_filesystem_zone_for_climate(self):
+        from branchfm.service import filesystem
+        facts = filesystem(self.root)
+        self.assertIn(facts['zone'],('native','windows','network','ephemeral'))
+        self.assertTrue(facts['writable'])
+
     def test_expanded_siblings_have_disjoint_bands(self):
         for name in ('alpha','beta'):
             folder = self.root/name

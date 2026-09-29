@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from .atlas import biome, metadata
+from .atlas import biome, directory_facts, metadata
 from .model import Operations, size
 from .preview import preview
 
@@ -76,6 +76,43 @@ class Service(ThreadingHTTPServer):
         self.mutation_lock = threading.Lock()
         self.extract_slots = threading.Semaphore(3)
         self.cache = {}
+
+
+FS_CLIMATE = {'9p':'windows','drvfs':'windows','v9fs':'windows','cifs':'network','smb3':'network','nfs':'network',
+              'nfs4':'network','fuse.sshfs':'network','fuse.rclone':'network','tmpfs':'ephemeral','ramfs':'ephemeral',
+              'proc':'ephemeral','sysfs':'ephemeral','devtmpfs':'ephemeral','cgroup2':'ephemeral','debugfs':'ephemeral'}
+
+
+def filesystem(path):
+    """The mount containing path: its type decides the region's climate."""
+    best = ('/','unknown')
+    try:
+        with open('/proc/mounts',encoding='utf-8',errors='replace') as mounts:
+            for line in mounts:
+                parts = line.split()
+                if len(parts)<3: continue
+                mount = parts[1].replace('\\040',' ')
+                inside = str(path)==mount or str(path).startswith(mount.rstrip('/')+'/')
+                if inside and len(mount)>=len(best[0]):
+                    best = (mount,parts[2])
+    except OSError:
+        pass
+    return {'mount':best[0],'type':best[1],'zone':FS_CLIMATE.get(best[1],'native'),'writable':os.access(path,os.W_OK)}
+
+
+def survey(paths, budget=2.5):
+    """Shallow facts for a region's subdirectories, within a time budget. Directories not
+    reached in time are simply absent: the map shows them as unsurveyed, not as empty."""
+    import time
+    deadline = time.monotonic()+budget
+    facts = {}
+    for raw in paths[:200]:
+        if time.monotonic()>deadline:
+            break
+        path = Path(os.path.abspath(str(raw)))
+        if path.is_dir():
+            facts[str(path)] = directory_facts(path)
+    return facts
 
 
 def bash_destinations(command: str, cwd: Path):
@@ -187,8 +224,11 @@ class Handler(BaseHTTPRequestHandler):
                     match = next((i for i,e in enumerate(entries) if e['path']==focus),None)
                     if match is not None: page = match//page_size
                 page = min(page,max(0,(len(entries)-1)//page_size))
-                return self.reply(200,{'path':str(path),'parent':str(path.parent),'entries':entries[page*page_size:(page+1)*page_size],
+                return self.reply(200,{'path':str(path),'parent':str(path.parent),'filesystem':filesystem(path),'entries':entries[page*page_size:(page+1)*page_size],
                                        'total':len(entries),'page':page,'pages':max(1,(len(entries)+page_size-1)//page_size)})
+            if url.path=='/metadata' and path.is_dir():
+                # A shallow scandir; no file contents are read, so no worker process.
+                return self.reply(200,directory_facts(path))
             if url.path in ('/preview','/metadata'):
                 stat = path.stat()
                 kind = url.path[1:]
@@ -209,13 +249,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403,{'error':'Authentication required.'})
         try:
             length = int(self.headers.get('Content-Length','0'))
-            if not 0<length<=16384:
+            if not 0<length<=65536:
                 raise ValueError('Invalid request size.')
             body = json.loads(self.rfile.read(length))
             action = body.get('action')
             source = Path(body.get('source',self.server.start)).absolute()
             if self.path=='/command':
                 return self.reply(200,bash_destinations(body.get('command',''),source))
+            if self.path=='/survey':
+                return self.reply(200,{'facts':survey(body.get('paths',[]))})
             with self.server.mutation_lock:
                 if action in ('rename','mkdir'):
                     name = body.get('name','')
@@ -262,6 +304,8 @@ def launch():
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--capture',default='')
     parser.add_argument('--headless',action='store_true')
+    parser.add_argument('--focus',default='',help='smoke/capture only: zoom to this entry name')
+    parser.add_argument('--legend',action='store_true',help='smoke/capture only: open the legend')
     args = parser.parse_args()
     path = Path(args.path).expanduser().absolute()
     if not path.is_dir():
@@ -282,6 +326,10 @@ def launch():
         cmd.append('--smoke')
     if args.capture:
         cmd += ['--capture',args.capture]
+    if args.focus:
+        cmd += ['--focus',args.focus]
+    if args.legend:
+        cmd.append('--legend')
     try:
         return subprocess.call(cmd,env=env)
     finally:
