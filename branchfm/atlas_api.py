@@ -38,6 +38,21 @@ PLURAL = {'pdf': 'PDFs', 'images': 'images', 'video': 'videos', 'audio': 'record
           'disks': 'disk images', 'documents': 'documents', 'other': 'other files'}
 
 
+LIBRARY = {'video': 'video library', 'images': 'photo library', 'audio': 'music library', 'pdf': 'PDF library',
+           'documents': 'documents', 'code': 'source code', 'archives': 'archives', 'tables': 'tables',
+           'databases': 'databases', 'disks': 'disk images', 'binaries': 'programs'}
+
+
+def subtitle_for(c: dict) -> str:
+    """What a place is mostly made of, when that is clear: 'video library · 55 videos'."""
+    from .world import dominant_kind
+    kind, share = dominant_kind(c.get('kinds') or {}, c.get('kind_bytes') or {})
+    n = (c.get('kinds') or {}).get(kind, 0)
+    if kind is None or kind in ('other', 'folders') or share < 0.5 or n < 8:
+        return ''
+    return f"{LIBRARY.get(kind, kind)} · {patch_name(kind, n)}"
+
+
 def patch_name(kind: str, n: int) -> str:
     return f"{n:,} {PLURAL.get(kind, 'files')}"
 
@@ -168,7 +183,7 @@ class Atlas:
                 kind = 'continent' if (t.continental and not c.get('same_land', True)) else 'region'
                 regions.append({'name': c['name'], 'path': c['path'], 'x': c['centroid'][0], 'y': c['centroid'][1],
                                 'side': c['side']*(0.4 if hidden else 1.0), 'depth': depth+1, 'kind': kind, 'scanned': c['scanned'],
-                                'files': c['files'], 'dirs': c['dirs']})
+                                'files': c['files'], 'dirs': c['dirs'], 'subtitle': subtitle_for(c)})
                 if side_px >= 160:
                     inner = self.world.child(t, c)
                     if inner is not None:
@@ -178,12 +193,13 @@ class Atlas:
                 # A patch is named as a whole ("412 images") until its parcels are big enough
                 # to carry their own names.
                 for q in pl.get('patches', []):
-                    if q['n'] > 1 and q['side']/px >= 50 and x0 < q['x'] < x1 and y0 < q['y'] < y1:
+                    if q['n'] > 1 and q['side']/px >= 50 and x0 < q['x'] < x1 and y0 < q['y'] < y1 and not t.uniform:
                         patches.append({'name': patch_name(q['kind'], q['n']), 'x': q['x'], 'y': q['y'], 'side': q['side'],
                                         'kind': q['kind'], 'n': q['n'], 'path': t.path})
                 r = pl['r']
                 need = 36 if '/.' in t.path+'/' else 18
-                vis = np.flatnonzero((r/px >= need) & (pl['x'] > x0) & (pl['x'] < x1) & (pl['y'] > y0) & (pl['y'] < y1))
+                primary = ~np.asarray(pl.get('companion', np.zeros(pl['n'], dtype=bool)))   # subtitles stay unnamed
+                vis = np.flatnonzero((r/px >= need) & primary & (pl['x'] > x0) & (pl['x'] < x1) & (pl['y'] > y0) & (pl['y'] < y1))
                 # A handful of names per patch (the largest files), more as parcels grow:
                 # a field of 80 captions is one place, not 80 labels.
                 if vis.size and 'patch' in pl:

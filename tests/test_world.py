@@ -97,8 +97,10 @@ class WorldTests(unittest.TestCase):
     def test_tile_encoding(self):
         tile = Synth(self.world).tile(0, 0, 0)
         body = encode(tile)
-        self.assertEqual(body[:4], b'BTL2')
-        self.assertEqual(len(body), 36+N*N*4*5)
+        self.assertEqual(body[:4], b'BTL3')
+        import struct
+        count = struct.unpack_from('<I', body, 36+N*N*4*5)[0]
+        self.assertEqual(len(body), 36+N*N*4*5+4+count*24)
 
     def test_files_of_a_kind_form_one_patch(self):
         # Mixed files in one folder: each kind clusters into a cohesive patch, not confetti.
@@ -142,6 +144,59 @@ class WorldTests(unittest.TestCase):
                     on_network += 1
                     break
         self.assertEqual(on_network, len(ends))
+
+    def test_coast_distance_agrees_with_labels(self):
+        # Coastal slopes are built on coast_distance: it must be <= 0 wherever the map draws
+        # sea and >= 0 on land, or the shore becomes a wall (a real regression near Kino).
+        from branchfm.world import SEA, OUT, coast_distance
+        root = self.world.root()
+        rng = np.random.default_rng(3)
+        xs, ys = rng.uniform(0.05, 0.95, 20000), rng.uniform(0.05, 0.95, 20000)
+        px = 1e-4
+        lab, _ = label_at(root, xs, ys, px)
+        d = coast_distance(root, xs, ys, px)
+        sea = (lab == SEA) | (lab == OUT)
+        self.assertTrue(sea.any() and (~sea).any())
+        self.assertLessEqual(float(d[sea].max()), 1e-9)
+        self.assertGreaterEqual(float(d[~sea].min()), -1e-9)
+
+    def test_companion_files_join_the_main_patch(self):
+        # A film folder: one large video and its subtitles. The subtitles are plain ground
+        # in the video's patch, not a scrub patch of their own.
+        film = self.tree/'film'
+        film.mkdir()
+        with open(film/'movie.mkv', 'wb') as f:
+            f.truncate(200_000_000)
+        for lang in ('en', 'de', 'fr', 'ru', 'es'):
+            (film/f'movie.{lang}.srt').write_text('1\n00:00:01,000 --> 00:00:02,000\nhi\n')
+        survey(self.index, self.tree)
+        world = World(self.index)
+        try:
+            pl = world.territory_for(str(film)).places
+            self.assertEqual([q['kind'] for q in pl['patches']], ['video'])
+            self.assertEqual(pl['patches'][0]['n'], 1)
+            self.assertEqual(int(pl['companion'].sum()), 5)
+        finally:
+            world.store.close()
+
+    def test_libraries_are_recognised(self):
+        # Ten album folders under one parent: a music library, drawn as one landscape.
+        lib = self.tree/'music'
+        for i in range(10):
+            album = lib/f'album-{i}'
+            album.mkdir(parents=True)
+            for j in range(4):
+                with open(album/f'{j:02d}.flac', 'wb') as f:
+                    f.truncate(5_000_000)
+            (album/'cover.nfo').touch()
+        survey(self.index, self.tree)
+        world = World(self.index)
+        try:
+            t = world.territory_for(str(lib))
+            self.assertEqual(t.uniform, 'audio')
+            self.assertFalse([r for r in t.rivers if r['kind'] == 'upper'])
+        finally:
+            world.store.close()
 
     def test_continents_end_in_deltas(self):
         root = self.world.root()

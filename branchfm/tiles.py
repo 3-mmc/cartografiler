@@ -29,7 +29,7 @@ import numpy as np
 
 from .index import NO_CRAWL
 
-from .world import FIRST_CHILD, HOME, OUT, SEA, GridNoise, World, _bilinear, fbm, label_at, lattice, sea_distance, stable_hash, value_noise
+from .world import FIRST_CHILD, HOME, OUT, SEA, GridNoise, World, _bilinear, coast_distance, content_shares, fbm, label_at, lattice, stable_hash, value_noise
 
 N = 257
 DAY = 86400.0
@@ -70,6 +70,12 @@ ROCK_LIMITS = np.array([lim for lim, _ in ROCK_BY_AGE[:-1]])
 ROCK_LUT = np.array([c for _, c in ROCK_BY_AGE], dtype=np.float64)
 KIND_NAMES = ('pdf', 'images', 'video', 'audio', 'tables', 'code', 'databases', 'archives', 'binaries', 'disks', 'documents', 'other')
 KIND_CODE = {k: i for i, k in enumerate(KIND_NAMES)}
+SYMBOL_KINDS = ('video', 'pdf', 'images', 'archives', 'audio', 'code')
+# 3D instances the client draws (native/models.gd builds the meshes, in this order).
+BROADLEAF, CONIFER, HOUSE, BOULDER = range(4)
+MAX_INSTANCES = 12000
+INSTANCE = np.dtype([('u', '<f4'), ('v', '<f4'), ('h', '<f4'), ('s', '<f4'), ('kind', 'u1'), ('yaw', 'u1'),
+                     ('rgb', 'u1', 3), ('pad', 'u1', 3)])
 # Muted crops (wheat, young green, dark green, ploughed, stubble) and roofs (terracotta,
 # slate, limestone, weathered); database towns are slate-blue.
 CROPS = np.array([(176, 160, 92), (128, 142, 74), (96, 116, 62), (132, 106, 78), (164, 152, 112)], dtype=np.float64)
@@ -94,13 +100,11 @@ def smoothstep(a, b, x):
     return t*t*(3-2*t)
 
 
-def cover_fractions(kinds: dict) -> np.ndarray:
+def cover_fractions(kinds: dict, kind_bytes: dict | None = None) -> np.ndarray:
+    # Count (log-compressed, so diversity shows) weighted by share of the bytes.
     f = np.zeros(len(COVERS))
-    total = 0
-    for kind, count in (kinds or {}).items():
-        cover = COVER_OF.get(kind, 'dry')
-        f[COVERS.index(cover)] += math.log1p(count)   # diversity shows even when one kind dominates
-        total += 1
+    for kind, share in content_shares(kinds, kind_bytes).items():
+        f[COVERS.index(COVER_OF.get(kind, 'dry'))] += share
     if f.sum() == 0:
         f[COVERS.index('dry')] = 1
     return f/f.sum()
@@ -133,6 +137,7 @@ class Synth:
         leaves = []                     # (territory, entry or None)
         fade_in = np.ones(M)
         leaf_bd = np.zeros(M)           # distance to the leaf's own border (home districts)
+        symbol = np.zeros((M, 2))       # library landforms: strength, kind code
 
         clock = [time.perf_counter()]
         timing = {}
@@ -174,7 +179,7 @@ class Synth:
                 m = pk == 0
                 if m.any():
                     k = idx[m]
-                    depth[k] = smoothstep(0, 0.08*side_T, np.minimum(bd[m], sea_distance(T, xs[k], ys[k])) if T.continental else bd[m])
+                    depth[k] = smoothstep(0, 0.08*side_T, np.minimum(bd[m], np.maximum(-coast_distance(T, xs[k], ys[k], px, self.G, k), 0)) if T.continental else bd[m])
                     water[k] = 1.0
                     leaf_kind[k] = 2
                     leaves.append((T, None))
@@ -208,12 +213,15 @@ class Synth:
                         # Continents rise out of the sea with shelving coasts and rolling uplands.
                         # Measured from the sea: provinces of one disk share land, and their mutual
                         # borders are ridges, not coasts.
-                        bs = sea_distance(T, xs[k], ys[k])
+                        bs = np.maximum(coast_distance(T, xs[k], ys[k], px, self.G, k), 0)
                         shore = smoothstep(0, 0.09*typical*2, bs)
                         hills = self.G.smooth_fbm(_octave(1.1/typical), 5, 300)[k]
                         H[k] += typical*(0.02*shore + 0.016*shore*(hills+0.25))*f
                         coast[k] = np.maximum(coast[k], (1-smoothstep(0, 0.024*typical, bs))*f)
-                        inland = b < bs*0.999
+                        # Ridges follow every border but fade out toward the sea: a boolean
+                        # "which border is nearest" test flipped between estimates and left steps.
+                        inland = np.ones(k.size, dtype=bool)
+                        coastfade = smoothstep(0, 0.07*typical, bs)
                     else:
                         # Provinces rise a little above the parent's basin (the home district is
                         # the basin); divides come and go.
@@ -227,6 +235,12 @@ class Synth:
                             H[kc] += 0.014*scc*(hills+0.35)*smoothstep(0, 0.3*scc, b[child])*f[child]
                         inland = np.ones(k.size, dtype=bool)
                         show = smoothstep(300, 900, side_T/px)*(1-smoothstep(3000, 9000, side_T/px))
+                        if T.uniform:
+                            # A library is one landscape: no divides between its members, and
+                            # each member stands as one landform of the library's kind.
+                            inland = np.zeros(k.size, dtype=bool)
+                            show = 0
+                            self._library_symbols(T, k, b, sc, pk[relief], seed_l[inv[relief]], inv[relief], entries, f, xs, ys, px, H, symbol)
                         if show > 0:
                             dots = (self.G.value(0.25/px, 77)[k] > 0.45)
                             border_line[k] = np.maximum(border_line[k], np.clip(1.0-b/px, 0, 1)*show*dots*0.6)
@@ -239,6 +253,8 @@ class Synth:
                             v = (ys[ki]-T.y0)/T.cell-0.5
                             gate *= smoothstep(1.0, 3.5, _bilinear(T.river_dist, u, v, T.n))
                         rr = np.exp(-(b[inland]/(0.07*typical))**2)*gate
+                        if T.continental:
+                            rr *= coastfade[inland]
                         H[ki] += 0.03*typical*rr*f[inland]
                         ridge[ki] = np.maximum(ridge[ki], rr*f[inland]*0.8)
                 m = pk == 3
@@ -261,11 +277,14 @@ class Synth:
                         kk = k[sel]
                         # Detail inside a place fades in as it grows on screen, and fades out
                         # at its own border, so no deeper level can raise a step at an edge.
-                        fade_in[kk] = f[sel]*smoothstep(24*px, 90*px, side_l[li])*smoothstep(0, 0.12*side_l[li], b_child[sel])
+                        # Library members keep their single landform longer before their own
+                        # fields take over (60-160 px rather than 24-90 px).
+                        lo, hi = (60, 160) if T.uniform else (24, 90)
+                        fade_in[kk] = f[sel]*smoothstep(lo*px, hi*px, side_l[li])*smoothstep(0, 0.12*side_l[li], b_child[sel])
                         next_ids.append(np.full(kk.size, inside.node_id, dtype=np.int64))
                         next_idx.append(kk)
                     else:
-                        leaves.append((T, entry))
+                        leaves.append((T, self._aggregate(T, side_T, entry) if T.uniform else entry))
                         leaf_lut[li] = len(leaves)-1
                 leafy = leaf_lut[sub_inv] >= 0
                 if leafy.any():
@@ -281,9 +300,10 @@ class Synth:
             else:
                 active = np.array([], dtype=np.int64)
         lap('descent')
-        # Fractal detail, self-similar in world units (octaves from 64 tiles down to 2 px).
+        # Fractal detail, self-similar in world units, from 64 tiles down to 8 samples; finer
+        # relief is drawn by the GPU at screen resolution (terrain.gdshader).
         kmin = max(0, int(math.floor(math.log2(1/(64*S)))))
-        kmax = int(math.floor(math.log2(1/(2*px))))
+        kmax = int(math.floor(math.log2(1/(8*px))))
         land = water < 0.5
         detail = np.zeros(M)
         for k in range(kmin, kmax+1):
@@ -294,8 +314,11 @@ class Synth:
 
         lap('detail')
         mat = np.zeros((M, len(MATERIALS)))
+        self._planned = np.zeros(M, dtype=bool)   # pixels whose houses come from their lots
+        self._lots = []
         colour = self._colour(xs, ys, px, H, ridge, water, depth, leaf_kind, leaf_ref, leaves, now, coast, mat)
         lap('colour')
+        self._symbol_colour(symbol, colour, mat, H, px)
         rain = self._rain(leaf_ref, leaves, M)
         fog = (leaf_kind == 3).astype(np.float64)
         lap('rain')
@@ -309,12 +332,71 @@ class Synth:
 
         base = float(H.min())
         mat *= (water < 0.5)[:, None]
+        instances = self._instances(tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind)
+        lap('instances')
         mat = np.clip(mat*255, 0, 255).astype(np.uint8)
-        return {'level': level, 'x': tx, 'y': ty, 'base': base,
+        return {'level': level, 'x': tx, 'y': ty, 'base': base, 'instances': instances,
                 'height': (H-base).astype(np.float32).reshape(N, N),
                 'colour': np.clip(colour, 0, 255).astype(np.uint8).reshape(N, N, 4),
                 'aux': np.stack([np.clip(rain*255, 0, 255), np.clip(fog*255, 0, 255), np.clip(depth*255, 0, 255), np.clip(ridge*255, 0, 255)], axis=1).astype(np.uint8).reshape(N, N, 4),
                 'mat_a': mat[:, :4].reshape(N, N, 4).copy(), 'mat_b': mat[:, 4:].reshape(N, N, 4).copy()}
+
+    def _instances(self, tx, ty, x0, y0, S, px, H, base, water, colour, mat, leaf_kind):
+        """3D landmarks for the client to instance: trees where the ground is forest, houses
+        on town ground (from the actual lots where a town of files is drawn), boulders on bare
+        rock. Positions are tile-relative; sizes are map symbols (a few samples), like Civ's
+        trees, so a forest reads as a forest at every zoom."""
+        sp = 3
+        g = np.arange(0, N-1, sp)
+        I, J = np.meshgrid(g, g)
+        I, J = I.ravel().astype(np.int64), J.ravel().astype(np.int64)
+        gx, gy = tx*(N-1)+I, ty*(N-1)+J
+        r = [lattice(gx, gy, 9301+q) for q in range(5)]
+        fx = np.clip(I+r[0]*sp, 0, N-1.001)
+        fy = np.clip(J+r[1]*sp, 0, N-1.001)
+        k = np.rint(fy).astype(np.int64)*N+np.rint(fx).astype(np.int64)
+        ok = (water[k] < 0.3) & (leaf_kind[k] <= 1)
+        forest, town, rock, snow = mat[k, FOREST], mat[k, TOWN], mat[k, ROCK], mat[k, SNOWM]
+        kind = np.full(k.size, -1, dtype=np.int64)
+        # Only where a cover clearly dominates, so models gather in clumps (a wood, a village)
+        # instead of sprinkling every mixed patch.
+        tree = ok & (r[2] < np.clip((forest-0.35)*1.8, 0, 0.97))
+        kind[tree] = np.where(r[3][tree] < 0.22+snow[tree]*2.5, CONIFER, BROADLEAF)
+        house = ok & ~tree & (r[4] < np.clip((town-0.45)*1.6, 0, 0.85)) & ~self._planned[k]
+        kind[house] = HOUSE
+        boulder = ok & ~tree & ~house & (r[4] < np.clip((rock-0.5)*0.25, 0, 0.12))
+        kind[boulder] = BOULDER
+        keep = kind >= 0
+        size = np.where(kind == HOUSE, 1.25, np.where(kind == BOULDER, 0.7, 1.15+0.5*r[3]))*sp*px
+        tint = colour[k, :3]*np.where(kind[:, None] == BOULDER, 0.95, 1.08)
+        roofs = ROOFS[(r[3]*len(ROOFS)).astype(np.int64) % len(ROOFS)]
+        tint = np.where(kind[:, None] == HOUSE, roofs, tint)
+        u, v, hh = fx[keep]/(N-1), fy[keep]/(N-1), H[k[keep]]
+        kinds, sizes, yaws, tints = kind[keep], size[keep], r[4][keep]*math.tau, tint[keep]
+        if self._lots:
+            lots = np.vstack(self._lots)
+            li = ((lots[:, 0]-x0)/px).astype(np.int64)
+            lj = ((lots[:, 1]-y0)/px).astype(np.int64)
+            inside = (li >= 0) & (li < N) & (lj >= 0) & (lj < N)
+            inside[inside] &= water[lj[inside]*N+li[inside]] < 0.3   # no houses in the river
+            lots, li, lj = lots[inside], li[inside], lj[inside]
+            u = np.concatenate([u, (lots[:, 0]-x0)/S])
+            v = np.concatenate([v, (lots[:, 1]-y0)/S])
+            hh = np.concatenate([hh, H[lj*N+li]])
+            kinds = np.concatenate([kinds, np.full(len(lots), HOUSE)])
+            # A house is a map symbol too: a wide lot gets a house of symbol size, not a hangar.
+            sizes = np.concatenate([sizes, np.clip(lots[:, 2]*1.4, 2.5*px, 1.6*sp*px)])
+            yaws = np.concatenate([yaws, -lots[:, 3]])
+            tints = np.vstack([tints, lots[:, 4:7]])
+        order = np.argsort(-sizes, kind='stable')[:MAX_INSTANCES]
+        out = np.zeros(len(order), dtype=INSTANCE)
+        out['u'], out['v'] = u[order], v[order]
+        out['h'] = (hh[order]-base)/S
+        out['s'] = sizes[order]/S
+        out['kind'] = kinds[order]
+        out['yaw'] = (np.mod(yaws[order], math.tau)/math.tau*255).astype(np.uint8)
+        out['rgb'] = np.clip(tints[order], 0, 255).astype(np.uint8)
+        return out
 
     def _grouped_fbm(self, k, side, scale, octaves, base_seed, seed_class):
         """Smooth noise with wavelength proportional to each place's size, from shared tile fields."""
@@ -327,11 +409,72 @@ class Synth:
         return out
 
     @staticmethod
-    def _aggregate(T, side_T):
+    def _aggregate(T, side_T, entry=None):
         node = T.node
-        return {'path': T.path, 'kinds': json.loads(node['kinds']) if node.get('kinds') else {}, 'newest': node.get('newest') or 0,
+        if entry is not None:
+            # A library member drawn in the library's colours, but keeping its own age and activity.
+            base = Synth._aggregate(T, side_T)
+            base.update(path=entry['path'], newest=entry['newest'] or base['newest'], day=entry['day'], side=entry['side'],
+                        scanned=entry['scanned'], files=entry['files'], dirs=entry['dirs'])
+            return base
+        return {'path': T.path, 'kinds': json.loads(node['kinds']) if node.get('kinds') else {},
+                'kind_bytes': json.loads(node['kind_bytes']) if node.get('kind_bytes') else {}, 'newest': node.get('newest') or 0,
                 'mtime': node.get('mtime') or 0, 'side': side_T*0.25, 'day': node.get('day') or 0, 'scanned': True,
                 'files': node.get('files') or 0, 'dirs': node.get('dirs') or 0}
+
+    def _library_symbols(self, T, k, b, sc, kinds_px, seeds, inv, entries, f, xs, ys, px, H, symbol):
+        """One landform per member of a library, fading out as that member's own fields fade in."""
+        code = KIND_CODE.get(T.uniform, -1)
+        if T.uniform not in SYMBOL_KINDS:
+            return
+        child = kinds_px >= 2   # members (tiny or not), not the home district
+        if not child.any():
+            return
+        kk = k[child]
+        cx = np.array([e['centroid'][0] if e is not None else 0.0 for e in entries])[inv[child]]
+        cy = np.array([e['centroid'][1] if e is not None else 0.0 for e in entries])[inv[child]]
+        side = sc[child]
+        d = np.hypot(xs[kk]-cx, ys[kk]-cy)/(0.5*side)
+        n1 = self._grouped_fbm(kk, side, 6.0, 3, 717, np.zeros(kk.size, dtype=np.int64))
+        top = smoothstep(0.62, 0.42, d+0.14*n1)
+        # Heights vanish at each member's border and hand over to its own fields up close.
+        w = top*smoothstep(0, 0.15*side, b[child])*(1-smoothstep(60*px, 160*px, side))*f[child]
+        rise = {'video': 0.07, 'pdf': 0.09, 'images': 0.025, 'archives': 0.03, 'audio': -0.004, 'code': 0.012}[T.uniform]
+        H[kk] += rise*side*(top if T.uniform != 'pdf' else top**0.6)*w/np.maximum(top, 1e-9)
+        symbol[kk, 0] = np.maximum(symbol[kk, 0], w)
+        symbol[kk, 1] = code
+
+    def _symbol_colour(self, symbol, colour, mat, H, px):
+        on = symbol[:, 0] > 0.01
+        if not on.any():
+            return
+        k = np.flatnonzero(on)
+        w = np.clip(symbol[k, 0]*1.4, 0, 1)
+        for c in np.unique(symbol[k, 1]).astype(int):
+            sel = symbol[k, 1] == c
+            kk, ww = k[sel], w[sel]
+            kind = KIND_NAMES[c]
+            if kind == 'video':
+                band = np.sin(H[kk]/(px*6)*math.pi)*0.5+0.5
+                col = np.array((160, 96, 66))*(1-band[:, None])+np.array((204, 162, 116))*band[:, None]
+                m = np.eye(8)[ROCK]*0.6+np.eye(8)[SAND]*0.4
+            elif kind == 'images':
+                col = np.array((50, 72, 48))*np.ones((kk.size, 1))
+                m = np.eye(8)[FOREST]
+            elif kind == 'pdf':
+                col = np.array((118, 110, 100))*np.ones((kk.size, 1))
+                m = np.eye(8)[ROCK]
+            elif kind == 'archives':
+                col = np.array((222, 230, 236))*np.ones((kk.size, 1))
+                m = np.eye(8)[SNOWM]
+            elif kind == 'audio':
+                col = np.array((92, 110, 96))*np.ones((kk.size, 1))
+                m = np.eye(8)[WET]
+            else:
+                col = np.array((128, 120, 112))*np.ones((kk.size, 1))
+                m = np.eye(8)[TOWN]
+            colour[kk, :3] = colour[kk, :3]*(1-ww[:, None])+col*ww[:, None]
+            mat[kk] = mat[kk]*(1-ww[:, None])+m[None, :]*ww[:, None]
 
     # ---------------------------------------------------------------- colour
 
@@ -353,14 +496,17 @@ class Synth:
             palette = CLIMATE.get(zone, CLIMATE['native'])
             if entry is not None:
                 kinds, newest, side = entry['kinds'], entry['newest'] or entry['mtime'], entry['side']
+                kind_bytes = entry.get('kind_bytes')
             else:
                 places = T.places
                 kinds = {'documents': 1}   # a home district is lowland meadow under its landmarks
-                for kd in places.get('kinds', []):
+                kind_bytes = {}
+                for kd, size in zip(places.get('kinds', []), places.get('size', [])):
                     kinds[kd] = kinds.get(kd, 0)+1
+                    kind_bytes[kd] = kind_bytes.get(kd, 0)+float(size)
                 newest = float(places['mtime'].max()) if places.get('n') else (T.node.get('newest') or 0)
                 side = T.node.get('side', T.size)
-            fractions[i] = cover_fractions(kinds)
+            fractions[i] = cover_fractions(kinds, kind_bytes)
             for ci, name in enumerate(COVERS):
                 cover_rgb[i, ci] = self._cover_rgb(name, palette)
             age = (now-newest)/DAY if newest else 400
@@ -647,9 +793,11 @@ class Synth:
             if not hasattr(self, 'site_cache') or len(self.site_cache) > 256:
                 self.site_cache = {}
             from scipy.spatial import cKDTree
-            codes = np.array([KIND_CODE.get(k, KIND_CODE['other']) for k in pl['kinds']], dtype=np.int64)
+            # Companions are drawn as their patch's plain ground: the patch kind, no landmark.
+            codes = np.array([KIND_CODE.get(k, KIND_CODE['other']) for k in pl.get('layout_kinds', pl['kinds'])], dtype=np.int64)
             seeds = np.array([stable_hash(p) for p in pl['paths']], dtype=np.uint64)
-            hit = (cKDTree(np.column_stack([pl['x'], pl['y']])), codes, (seeds % np.uint64(1 << 20)).astype(np.float64)/(1 << 20))
+            landmark = ~np.asarray(pl.get('companion', np.zeros(pl['n'], dtype=bool)))
+            hit = (cKDTree(np.column_stack([pl['x'], pl['y']])), codes, (seeds % np.uint64(1 << 20)).astype(np.float64)/(1 << 20), landmark)
             self.site_cache[key] = hit
         return hit
 
@@ -670,7 +818,7 @@ class Synth:
             k = np.flatnonzero((leaf_kind == 1) & np.isin(leaf_ref, refs))
             if k.size == 0:
                 continue
-            tree, codes, hue = self._sites(T)
+            tree, codes, hue, landmark = self._sites(T)
             R = pl['r']
             rmean = float(np.median(R))
             if rmean < px*0.25:
@@ -702,7 +850,7 @@ class Synth:
             hf = fade_in[k]*smoothstep(0, min(0.6*rmean, 0.5*T.cell), leaf_bd[k])*smoothstep(0, 0.25, pe)
             edge_soft = smoothstep(0.0, 0.18, pe+0.08*(self.G.value(_octave(3/rmean), 813)[k]-0.5))
             age = (now-pl['mtime'][i1])/DAY
-            prom = 0.6+0.4*np.clip(np.log10(pl['size'][i1]+1)/9, 0, 1)
+            prom = (0.6+0.4*np.clip(np.log10(pl['size'][i1]+1)/9, 0, 1))*landmark[i1]
             tone = hue[i1]
             n1 = self.G.smooth_fbm(_octave(3.0/rmean), 3, 815)[k]
             code = codes[i1]
@@ -719,7 +867,7 @@ class Synth:
                 if kind == 'pdf':
                     # A massif: each PDF a peak, saddles between them; rock by age.
                     sharp = np.where(age[s_] < 180, 1.6, np.where(age[s_] < 1095, 1.0, 0.7))
-                    peak = np.clip(1-rr/1.15, 0, 1)**sharp
+                    peak = np.clip(1-rr/1.15, 0, 1)**sharp*landmark[i1][s_]
                     h[s_] = r1[s_]*0.18*smoothstep(0, 0.5, pe[s_])+rf[s_]*0.45*prom[s_]*peak*smoothstep(0, 0.15, ee)
                     rock = ROCK_LUT[np.searchsorted(ROCK_LIMITS, age[s_])]
                     mix = np.clip(0.35+peak*1.6, 0, 1)[:, None]
@@ -739,7 +887,7 @@ class Synth:
                 elif kind == 'video':
                     # Canyon country: each video a mesa of banded strata, as film is banded in
                     # frames; a large file is a broad, tall mesa, a small one a butte.
-                    top = smoothstep(0.72, 0.52, rr+0.12*n1[s_])
+                    top = smoothstep(0.72, 0.52, rr+0.12*n1[s_])*landmark[i1][s_]
                     hh = rf[s_]*0.3*prom[s_]*top
                     h[s_] = hh*smoothstep(0, 0.1, ee)
                     band = np.sin(hh/(rf[s_]*0.025)*math.pi)*0.5+0.5
@@ -784,13 +932,31 @@ class Synth:
                     # Houses fill each block, denser toward its heart, with gardens between.
                     size = 0.26+0.14*lot
                     bld = ((np.abs(fu-0.5) < size) & (np.abs(fv-0.5) < size*0.8) & (d1[s_]/r1[s_] < 0.88) & (lot > 0.2+0.5*d1[s_]/r1[s_])).astype(np.float64)*fine[s_]
+                    # Painted roofs only while a lot is small on screen; beyond that the 3D
+                    # houses (symbol-sized) stand in for them.
+                    painted = bld*(1-smoothstep(10.0, 16.0, r1[s_]*0.16/px))
                     roofs = ROOFS_DB if kind == 'databases' else ROOFS
                     roof = roofs[(lot*len(roofs)).astype(np.int64) % len(roofs)]
                     town = np.array((134, 126, 116))*(0.94+0.12*n1[s_, None])
-                    col = town*(1-bld[:, None])+roof*bld[:, None]
+                    col = town*(1-painted[:, None])+roof*painted[:, None]
                     out[s_] = col*(1-street[:, None])+np.array((104, 102, 98))*street[:, None]
-                    h[s_] = r1[s_]*0.03*(0.8+lot)*bld
+                    # No building heights in the terrain: the houses are 3D models (see
+                    # _instances); raised lots became pillars on wide parcels.
                     m[s_, TOWN] = 1
+                    # The same lots become 3D houses, lined up with their streets.
+                    pix = k[s_]
+                    self._planned[pix[fine[s_] > 0.3]] = True
+                    on = bld > 0.5
+                    if on.any():
+                        fu0, fv0 = np.floor(u[on]), np.floor(v[on])
+                        key = np.stack([i1[s_][on], fu0, fv0], axis=1)
+                        _, first = np.unique(key, axis=0, return_index=True)
+                        cu, cv = fu0[first]+0.5, fv0[first]+0.5
+                        rr_ = r1[s_][on][first]*0.16
+                        an = ang[on][first]
+                        wx_ = sx[i1][s_][on][first]+(cu*np.cos(an)-cv*np.sin(an))*rr_
+                        wy_ = sy[i1][s_][on][first]+(cu*np.sin(an)+cv*np.cos(an))*rr_
+                        self._lots.append(np.column_stack([wx_, wy_, 2*size[on][first]*rr_, an, roof[on][first]]))
                 elif kind == 'archives':
                     # A glacier: one ice body, crevassed between files.
                     crev = (1-smoothstep(0.02, 0.06, ee))*detail[s_]
@@ -800,13 +966,13 @@ class Synth:
                     m[s_, SNOWM] = 1
                 elif kind == 'binaries':
                     # Obsidian: dark volcanic glass in blocky flows.
-                    shard = np.clip(1-rr/0.85, 0, 1)**1.5*(0.6+0.4*np.abs(n1[s_]))
+                    shard = np.clip(1-rr/0.85, 0, 1)**1.5*(0.6+0.4*np.abs(n1[s_]))*landmark[i1][s_]
                     out[s_] = np.array((88, 84, 92))*(0.85+0.4*shard[:, None])
                     h[s_] = rf[s_]*0.12*shard*smoothstep(0, 0.1, ee)
                     m[s_, ROCK] = 1
                 elif kind == 'disks':
-                    rim = np.exp(-((rr-0.7)/0.15)**2)
-                    inner = np.clip((0.55-rr)*rf[s_]/px+0.5, 0, 1)
+                    rim = np.exp(-((rr-0.7)/0.15)**2)*landmark[i1][s_]
+                    inner = np.clip((0.55-rr)*rf[s_]/px+0.5, 0, 1)*landmark[i1][s_]
                     col = base[s_]*(1-rim[:, None]*0.7)+np.array((96, 76, 66))*rim[:, None]*0.7
                     out[s_] = col*(1-inner[:, None])+SEA_SHALLOW*inner[:, None]
                     h[s_] = (rim*0.18-inner*0.04)*rf[s_]*smoothstep(0, 0.1, ee)
@@ -823,7 +989,7 @@ class Synth:
                 else:
                     # Scrub with a cairn at each file.
                     shrub = (self.G.value(_octave(14.0/rmean), 6161)[k][s_] > 0.7)*fine[s_]
-                    cairn = np.clip((0.12-rr)*rf[s_]/px+0.5, 0, 1)*detail[s_]
+                    cairn = np.clip((0.12-rr)*rf[s_]/px+0.5, 0, 1)*detail[s_]*landmark[i1][s_]
                     col = np.array((150, 142, 110))*(0.97+0.06*tt[:, None])
                     col = col*(1-shrub[:, None]*0.5)+np.array((96, 104, 72))*shrub[:, None]*0.5
                     out[s_] = col*(1-cairn[:, None])+np.array((168, 164, 152))*cairn[:, None]
@@ -857,7 +1023,12 @@ class Synth:
 
 def encode(tile: dict) -> bytes:
     """Binary tile: header (magic, n, level, x, y, base) then float32 heights, RGBA colour,
-    RGBA aux (rain, fog, depth, ridge) and two RGBA material-weight maps (MATERIALS order)."""
-    head = struct.pack('<4sIIqqd', b'BTL2', N, tile['level'], tile['x'], tile['y'], tile['base'])
+    RGBA aux (rain, fog, depth, ridge), two RGBA material-weight maps (MATERIALS order), and
+    the 3D instances: a uint32 count then INSTANCE records (tile-relative u, v, height/S,
+    size/S as float32; kind, yaw/256 turn, RGB tint as bytes)."""
+    head = struct.pack('<4sIIqqd', b'BTL3', N, tile['level'], tile['x'], tile['y'], tile['base'])
+    inst = tile.get('instances')
+    if inst is None:
+        inst = np.zeros(0, dtype=INSTANCE)
     return (head + tile['height'].astype('<f4').tobytes() + tile['colour'].tobytes() + tile['aux'].tobytes()
-            + tile['mat_a'].tobytes() + tile['mat_b'].tobytes())
+            + tile['mat_a'].tobytes() + tile['mat_b'].tobytes() + struct.pack('<I', len(inst)) + inst.tobytes())

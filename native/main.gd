@@ -5,6 +5,11 @@ extends Node3D
 # The cartographic grammar is in docs/cartography.md.
 
 const TERRAIN_SHADER = preload("res://terrain.gdshader")
+const INSTANCE_SHADER = preload("res://instances.gdshader")
+const MODELS = preload("res://models.gd")
+# Fixed (untinted) colour per instance kind: trunks, trunks, walls, rock.
+const MODEL_FIXED = [Color(0.30, 0.24, 0.18), Color(0.28, 0.22, 0.16), Color(0.80, 0.76, 0.68), Color(0.5, 0.48, 0.45)]
+const FOV = 38.0                # horizontal field of view in perspective
 const SERIF = preload("res://fonts/Cartography.ttf")
 const ITALIC = preload("res://fonts/CartographyItalic.ttf")
 const UI_FONT = preload("res://fonts/Interface.ttf")
@@ -31,7 +36,9 @@ var target_x = 0.5
 var target_y = 0.5
 var target_view = 1.25
 var heading = 0.0
-var tilt = 58.0
+var tilt = 50.0                 # Civ V plays at about 45-50 degrees, in perspective
+var perspective = true
+var models_on = true
 var h_ref = 0.0
 var flying = false
 var fly_tween: Tween
@@ -44,6 +51,7 @@ var inflight = 0
 var level = 0
 var serial = 0
 var tile_mesh: PlaneMesh
+var model_meshes: Array[ArrayMesh] = []
 
 # Selection and places.
 var selected = {}
@@ -447,19 +455,20 @@ func _build_world():
 	fill.light_energy = 0.25
 	world.add_child(fill)
 	camera = Camera3D.new()
-	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
 	camera.keep_aspect = Camera3D.KEEP_WIDTH
 	camera.size = RENDER
+	camera.fov = FOV
+	model_meshes = MODELS.build()
 	camera.near = 1.0
-	camera.far = 3000.0
+	camera.far = 20000.0
 	camera.current = true
 	world.add_child(camera)
 	var sea = PlaneMesh.new()
-	sea.size = Vector2(RENDER*20, RENDER*20)
+	sea.size = Vector2(RENDER*200, RENDER*200)   # reaches the horizon in perspective
 	var sea_mat = StandardMaterial3D.new()
 	sea_mat.albedo_color = Color8(24, 58, 72)   # the tiles' deep-sea colour, lit the same way
-	sea_mat.roughness = 0.18
-	sea_mat.metallic_specular = 0.55
+	sea_mat.roughness = 0.45
+	sea_mat.metallic_specular = 0.3
 	ocean = MeshInstance3D.new()
 	ocean.mesh = sea
 	ocean.material_override = sea_mat
@@ -529,17 +538,17 @@ func tile_key(l: int, x: int, y: int) -> String:
 	return "%d:%d:%d" % [l, x, y]
 
 func update_tiles():
-	var vp = get_viewport().get_visible_rect().size
 	level = clampi(int(round(log(TILES_ACROSS/view)/log(2.0))), 0, 50)
 	var S = pow(0.5, level)
-	var depth_ratio = (vp.y/vp.x)/sin(deg_to_rad(tilt))
-	var reach = view*0.5*maxf(1.0, depth_ratio)*1.35
+	# The ground the view actually sees (a trapezoid in perspective), with a margin.
+	var b = view_bbox()
+	var margin = view*0.12
 	var count = 1 << mini(level, 62)
-	var x0 = clampi(int(floor((cam_x-reach)/S)), 0, count-1)
-	var x1 = clampi(int(floor((cam_x+reach)/S)), 0, count-1)
-	var y0 = clampi(int(floor((cam_y-reach)/S)), 0, count-1)
-	var y1 = clampi(int(floor((cam_y+reach)/S)), 0, count-1)
-	if (cam_x+reach) < 0 or (cam_x-reach) > 1 or (cam_y+reach) < 0 or (cam_y-reach) > 1:
+	var x0 = clampi(int(floor((b[0]-margin)/S)), 0, count-1)
+	var x1 = clampi(int(floor((b[2]+margin)/S)), 0, count-1)
+	var y0 = clampi(int(floor((b[1]-margin)/S)), 0, count-1)
+	var y1 = clampi(int(floor((b[3]+margin)/S)), 0, count-1)
+	if b[2]+margin < 0 or b[0]-margin > 1 or b[3]+margin < 0 or b[1]-margin > 1:
 		x1 = x0-1
 	wanted.clear()
 	var order = []
@@ -570,12 +579,15 @@ func update_tiles():
 		var t = tiles[key]
 		if t.get("loading", false): continue
 		t.node.visible = keep.has(key)
+		# Models only from tiles at the current level: a coarse fallback's larger trees would
+		# double up with the finer tile's.
+		for mmi in t.get("models", []): mmi.visible = t.node.visible and models_on and t.level == level
 		if t.node.visible:
 			t.age = 0
 		else:
 			t.age = t.get("age", 0)+1
 			if t.age > 300:
-				t.node.queue_free()
+				free_tile(t)
 				tiles.erase(key)
 	pump_requests()
 
@@ -605,7 +617,7 @@ func fetch_tile(l: int, x: int, y: int):
 	pump_requests()
 
 func install_tile(key: String, body: PackedByteArray):
-	if body.size() < 36 or body.slice(0, 4).get_string_from_ascii() != "BTL2":
+	if body.size() < 36 or body.slice(0, 4).get_string_from_ascii() != "BTL3":
 		if tiles.has(key) and tiles[key].get("loading", false): tiles.erase(key)
 		return
 	var n = body.decode_u32(4)
@@ -625,6 +637,8 @@ func install_tile(key: String, body: PackedByteArray):
 	var mat_a = Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, body.slice(offset, offset+plane*4))
 	offset += plane*4
 	var mat_b = Image.create_from_data(n, n, false, Image.FORMAT_RGBA8, body.slice(offset, offset+plane*4))
+	offset += plane*4
+	var models = build_models(body, offset)
 	var mat = ShaderMaterial.new()
 	mat.shader = TERRAIN_SHADER
 	mat.set_shader_parameter("heightmap", ImageTexture.create_from_image(heights))
@@ -644,9 +658,55 @@ func install_tile(key: String, body: PackedByteArray):
 	world.add_child(node)
 	var old = tiles.get(key, {})
 	if old.has("node") and is_instance_valid(old.node):
-		old.node.queue_free()
-	tiles[key] = {"node":node, "mat":mat, "level":l, "x":x, "y":y, "base":base, "heights":heights, "S":S, "age":0}
+		free_tile(old)
+	tiles[key] = {"node":node, "mat":mat, "level":l, "x":x, "y":y, "base":base, "heights":heights, "S":S, "age":0,
+		"models":models, "born":clock}
 	places_dirty = true
+
+func free_tile(t: Dictionary):
+	if t.has("node") and is_instance_valid(t.node): t.node.queue_free()
+	for mmi in t.get("models", []):
+		if is_instance_valid(mmi): mmi.queue_free()
+
+func build_models(body: PackedByteArray, offset: int) -> Array:
+	# Trees, houses and boulders: one MultiMesh per kind, positions relative to the tile.
+	var out = []
+	if body.size() < offset+4: return out
+	var count = body.decode_u32(offset)
+	offset += 4
+	if count == 0 or body.size() < offset+count*24: return out
+	var per_kind = [[], [], [], []]
+	for i in count:
+		var o = offset+i*24
+		var kind = body[o+16]
+		if kind < per_kind.size(): per_kind[kind].append(o)
+	for kind in per_kind.size():
+		var rows = per_kind[kind]
+		if rows.is_empty(): continue
+		var mm = MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = model_meshes[kind]
+		mm.instance_count = rows.size()
+		for i in rows.size():
+			var o = rows[i]
+			var s = body.decode_float(o+12)
+			var yaw = body[o+17]/256.0*TAU
+			var basis = Basis(Vector3.UP, yaw).scaled(Vector3(s, s, s))
+			mm.set_instance_transform(i, Transform3D(basis, Vector3(body.decode_float(o), body.decode_float(o+8), body.decode_float(o+4))))
+			mm.set_instance_color(i, Color8(body[o+18], body[o+19], body[o+20]))
+		var mmi = MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		var m = ShaderMaterial.new()
+		m.shader = INSTANCE_SHADER
+		m.set_shader_parameter("fixed_colour", MODEL_FIXED[kind])
+		mmi.material_override = m
+		# Placed in the shader, so the CPU must not cull by the (unit-sized) instance bounds.
+		mmi.custom_aabb = AABB(Vector3(-1e5, -1e5, -1e5), Vector3(2e5, 2e5, 2e5))
+		mmi.visible = false
+		world.add_child(mmi)
+		out.append(mmi)
+	return out
 
 func load_detail_textures():
 	# CC0 ground detail (native/textures, fetched by tools/fetch_textures.py), one layer per material.
@@ -687,6 +747,16 @@ func place_tiles():
 		t.mat.set_shader_parameter("detail_uv0", Vector4(fposmod(ox/P0, 1.0), fposmod(oy/P0, 1.0), S/P0, S/P0))
 		t.mat.set_shader_parameter("detail_uv1", Vector4(fposmod(ox/P1, 1.0), fposmod(oy/P1, 1.0), S/P1, S/P1))
 		t.mat.set_shader_parameter("detail_mix", mix_f)
+		for mmi in t.get("models", []):
+			if not mmi.visible: continue
+			var m: ShaderMaterial = mmi.material_override
+			m.set_shader_parameter("tile_origin", Vector2((t.x*S-cam_x)/view*RENDER, (t.y*S-cam_y)/view*RENDER))
+			m.set_shader_parameter("tile_render", S/view*RENDER)
+			m.set_shader_parameter("tile_world", S)
+			m.set_shader_parameter("height_scale", scale)
+			m.set_shader_parameter("height_offset", (t.base-h_ref)*scale)
+			m.set_shader_parameter("sink", 0.0 if t.level == level else RENDER*0.004*(level-t.level))
+			m.set_shader_parameter("appear", smoothstep(0.0, 0.5, clock-float(t.get("born", 0.0))))
 	ocean.position = Vector3(0, (0.0-h_ref)*scale-0.05, 0)
 
 func height_at(x: float, y: float) -> float:
@@ -770,7 +840,9 @@ func _process(delta):
 		cam_y = lerpf(cam_y, target_y, k)
 		view = exp(lerpf(log(view), log(target_view), k))
 	h_ref = lerpf(h_ref, height_at(cam_x, cam_y), 1.0-exp(-delta*6.0))
-	var d = 400.0
+	camera.projection = Camera3D.PROJECTION_PERSPECTIVE if perspective else Camera3D.PROJECTION_ORTHOGONAL
+	if perspective: tilt = maxf(tilt, 35.0)
+	var d = (RENDER*0.5)/tan(deg_to_rad(FOV*0.5)) if perspective else 400.0
 	var r = deg_to_rad(tilt)
 	camera.position = Vector3(sin(heading)*cos(r)*d, sin(r)*d, cos(heading)*cos(r)*d)
 	camera.look_at(Vector3.ZERO, Vector3.UP)
@@ -834,7 +906,15 @@ func refresh_places():
 		var size_px = float(r.side)/px
 		var font_size = 26 if continent else clampi(int(9+log(size_px)/log(2.0)*1.5), 12, 22)
 		var w = make_label(text, SERIF, font_size, Color("f1ead4") if continent else Color("e6dfc6"), 2 if continent else 1)
-		place_labels.append({"widget":w, "x":float(r.x), "y":float(r.y), "priority":size_px*(4.0 if continent else 1.0), "region":true, "data":r})
+		var item = {"widget":w, "x":float(r.x), "y":float(r.y), "priority":size_px*(4.0 if continent else 1.0), "region":true, "data":r}
+		if String(r.get("subtitle", "")) != "" and size_px > 110:
+			# What a place is, under its name: "video library · 55 videos".
+			var sub = make_label(r.subtitle, ITALIC, maxi(11, font_size-5), Color("e9d9a8"), 1)
+			sub.get_parent().remove_child(sub)
+			w.add_child(sub)
+			sub.visible = true
+			item["sub"] = sub
+		place_labels.append(item)
 	for q in data.get("patches", []):
 		var size_px = float(q.side)/px
 		var w = make_label(q.name, ITALIC, clampi(int(8+log(size_px)/log(2.0)*1.2), 11, 16), Color("e9d9a8"), 1)
@@ -842,6 +922,9 @@ func refresh_places():
 	for f in data.get("files", []):
 		var w = make_label(f.name, ITALIC, 12, Color("f3edd8"), 1)
 		place_labels.append({"widget":w, "x":float(f.x), "y":float(f.y)+float(f.r)*1.1, "priority":float(f.r)/px, "region":false, "data":f})
+	# Each label stands on its own ground: on a tilted view a label drawn at the view's
+	# reference height slides off its place wherever the land is higher or lower.
+	for item in place_labels: item["h"] = height_at(item.x, item.y)
 	place_labels.sort_custom(func(a, b): return a.priority > b.priority)
 
 static func spaced(text: String) -> String:
@@ -874,11 +957,17 @@ func position_labels():
 		var w: Label = item.widget
 		w.visible = false
 		if label_mode == 2 or (label_mode == 1 and not item.region): continue
-		var pos = world_to_screen(item.x, item.y, h_ref)
+		var pos = world_to_screen(item.x, item.y, item.get("h", h_ref))
 		var size = w.get_minimum_size()
 		w.size = size
 		w.position = pos-size/2
 		var rect = Rect2(w.position, size).grow(3)
+		if item.has("sub"):
+			var sub: Label = item.sub
+			var ss = sub.get_minimum_size()
+			sub.size = ss
+			sub.position = Vector2((size.x-ss.x)/2, size.y-3)
+			rect = rect.merge(Rect2(w.position+sub.position, ss).grow(3))
 		if not screen.encloses(rect): continue
 		var clash = false
 		for other in occupied:
@@ -956,7 +1045,7 @@ func poll_status():
 				inflight += 1
 				fetch_tile(t.level, t.x, t.y)
 			else:
-				t.node.queue_free()
+				free_tile(t)
 				tiles.erase(key)
 	if not data.get("invalid", []).is_empty(): places_dirty = true
 	update_info()
@@ -1052,6 +1141,12 @@ func _unhandled_key_input(event):
 		KEY_K, KEY_QUESTION: toggle_legend()
 		KEY_SLASH: if event.shift_pressed: toggle_legend()
 		KEY_R: toggle_weather()
+		KEY_V:
+			perspective = not perspective
+			notify("Perspective view (as in Civ V)." if perspective else "Flat map view.", false, 2.5)
+		KEY_M:
+			models_on = not models_on
+			notify("Trees, houses and boulders shown." if models_on else "3D landmarks hidden.", false, 2.5)
 		KEY_L: cycle_labels()
 		KEY_F: toggle_chrome()
 		KEY_I: toggle_notes_body()
@@ -1073,7 +1168,7 @@ func update_hover(point: Vector2):
 	var best_d = 26.0
 	for item in place_labels:
 		if item.region: continue
-		var d = world_to_screen(item.x, float(item.data.y), h_ref).distance_to(point)
+		var d = world_to_screen(item.x, float(item.data.y), item.get("h", h_ref)).distance_to(point)
 		if d < best_d:
 			best = item
 			best_d = d
@@ -1278,7 +1373,7 @@ Temperate: Linux. Tropical: Windows drives. Wetland: network mounts. Desert: vir
 
 [color=#d9c68f][b]Moving[/b][/color]
 Drag to pan · wheel to zoom at the cursor · right-drag to turn and tilt · double-click to go to a place · Backspace up · Home: the whole world
-WASD / arrows pan · Q/E turn · PgUp/PgDn tilt · G gazetteer · Ctrl+P Bash · Ctrl+L path · R radar · L labels · F map only
+WASD / arrows pan · Q/E turn · PgUp/PgDn tilt · V perspective or flat map · M 3D landmarks · G gazetteer · Ctrl+P Bash · Ctrl+L path · R radar · L labels · F map only
 Space peek · F2 rename · Delete trash · Ctrl+C / X / V copy, cut, paste into the region you are over · Ctrl+Z undo"""
 
 # ---------------------------------------------------------------- Bash palette

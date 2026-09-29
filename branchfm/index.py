@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS nodes(
   scanned REAL DEFAULT 0, error TEXT,
   files INTEGER DEFAULT 0, dirs INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0, newest REAL DEFAULT 0,
   day INTEGER DEFAULT 0, week INTEGER DEFAULT 0, kinds TEXT, unscanned INTEGER DEFAULT 0,
-  dirty INTEGER DEFAULT 0);
+  dirty INTEGER DEFAULT 0, kind_bytes TEXT);
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent);
 CREATE INDEX IF NOT EXISTS nodes_dirty ON nodes(dirty) WHERE dirty=1;
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -83,6 +83,12 @@ class Index:
         with self.write_lock:
             db = self.db()
             db.executescript(SCHEMA)
+            columns = {r[1] for r in db.execute('PRAGMA table_info(nodes)')}
+            if 'kind_bytes' not in columns:
+                # Bytes per kind (a video library is video by weight, not by its subtitle count):
+                # added later, so every folder settles again, deepest first, in the background.
+                db.execute('ALTER TABLE nodes ADD COLUMN kind_bytes TEXT')
+                db.execute('UPDATE nodes SET dirty=1 WHERE is_dir=1 AND scanned>0')
             if db.execute("SELECT 1 FROM nodes WHERE path='/'").fetchone() is None:
                 db.execute("INSERT INTO nodes(parent,name,path,depth,is_dir,kind) VALUES(NULL,'/','/',0,1,'folders')")
             db.commit()
@@ -195,7 +201,8 @@ class Index:
                 files = dirs = size = day = week = unscanned = 0
                 newest = 0.0
                 kinds = {}
-                for c in db.execute('SELECT is_dir,kind,size,mtime,link,scanned,files,dirs,bytes,newest,day,week,kinds,unscanned FROM nodes WHERE parent=?', (row['id'],)):
+                kind_bytes = {}
+                for c in db.execute('SELECT is_dir,kind,size,mtime,link,scanned,files,dirs,bytes,newest,day,week,kinds,unscanned,kind_bytes FROM nodes WHERE parent=?', (row['id'],)):
                     if c['is_dir'] and not c['link']:
                         dirs += 1+c['dirs']
                         files += c['files']
@@ -207,6 +214,9 @@ class Index:
                         if c['kinds']:
                             for k, v in json.loads(c['kinds']).items():
                                 kinds[k] = kinds.get(k, 0)+v
+                        if c['kind_bytes']:
+                            for k, v in json.loads(c['kind_bytes']).items():
+                                kind_bytes[k] = kind_bytes.get(k, 0)+v
                     else:
                         files += 1
                         size += c['size'] or 0
@@ -215,8 +225,9 @@ class Index:
                         day += (now-m) < DAY
                         week += (now-m) < 7*DAY
                         kinds[c['kind']] = kinds.get(c['kind'], 0)+1
-                db.execute('UPDATE nodes SET files=?,dirs=?,bytes=?,newest=?,day=?,week=?,kinds=?,unscanned=?,dirty=0 WHERE id=?',
-                           (files, dirs, size, newest, day, week, json.dumps(kinds), unscanned, row['id']))
+                        kind_bytes[c['kind']] = kind_bytes.get(c['kind'], 0)+(c['size'] or 0)
+                db.execute('UPDATE nodes SET files=?,dirs=?,bytes=?,newest=?,day=?,week=?,kinds=?,unscanned=?,kind_bytes=?,dirty=0 WHERE id=?',
+                           (files, dirs, size, newest, day, week, json.dumps(kinds), unscanned, json.dumps(kind_bytes), row['id']))
             db.commit()
             if dirty:
                 self.version += 1

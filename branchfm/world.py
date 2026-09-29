@@ -35,7 +35,7 @@ from scipy.spatial import cKDTree
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
-LAYOUT_VERSION = 8          # bump when the layout changes shape, so cached territories are redone
+LAYOUT_VERSION = 12          # bump when the layout changes shape, so cached territories are redone
 
 # ---------------------------------------------------------------- hashing & noise
 
@@ -229,6 +229,7 @@ class Territory:
     river_dist: np.ndarray | None = None   # raster distance to the nearest river (cells)
     falls: bool = False              # its river falls at the outlet (ground changes)
     lakes: list = field(default_factory=list)
+    uniform: str | None = None       # a library: most subfolders are made of this one kind
 
     @property
     def cell(self) -> float:
@@ -320,13 +321,32 @@ def label_at(t: Territory, xs, ys, px: float, grid: 'GridNoise | None' = None, i
 
 
 def sea_distance(t: Territory, xs, ys):
-    """Distance to open water (world units); huge where a territory has no sea."""
+    """Signed distance to the coastline (world units): positive on land, negative at sea;
+    huge where a territory has no sea. Callers that must agree with label_at pass points
+    displaced by the same warp (see coast_distance)."""
     if t.sea_dist is None:
         return np.full(np.shape(xs), 1e300)
     u = (xs-t.x0)/t.size*t.n-0.5
     v = (ys-t.y0)/t.size*t.n-0.5
     # B-spline, not bilinear: relief is built on this, and bilinear facets show in the light.
     return _bspline_sample(t.sea_dist, u, v, t.n)*t.cell
+
+
+def coast_distance(t: Territory, xs, ys, px, grid=None, idx=None):
+    """Signed distance to the coastline as drawn: looked up through the same domain warp
+    that label_at uses, so it crosses zero where the map's land meets its sea."""
+    if t.sea_dist is None:
+        return np.full(np.shape(xs), 1e300)
+    ox, oy = warp_offsets(xs, ys, t.cell*16, warp_amplitude(t), px, grid, idx)
+    wx, wy = xs+ox, ys+oy
+    # The smooth (B-spline) field keeps slopes free of facets. It is scaled by the four-cell
+    # land vote (bilinear of the clipped ±0.5 indicator), which is exactly what label_at
+    # decides: zero where the drawn coast is, one once all four cells are land.
+    u = (wx-t.x0)/t.size*t.n-0.5
+    v = (wy-t.y0)/t.size*t.n-0.5
+    vote = np.clip(_bilinear(np.clip(t.sea_dist, -0.5, 0.5), u, v, t.n)*2.0, -1.0, 1.0)
+    smooth = sea_distance(t, wx, wy)
+    return np.where(vote > 0, np.maximum(smooth, 0)*vote, np.minimum(smooth, 0)*(-vote))
 
 
 def _bspline_sample(grid, u, v, n):
@@ -482,6 +502,38 @@ def _grid_graph(allowed, cost):
     m = len(flat)
     graph = coo_matrix((np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))), shape=(m, m)).tocsr() if rows else coo_matrix((m, m)).tocsr()
     return graph, ids
+
+
+def _kind_bytes(row) -> dict:
+    try:
+        raw = row['kind_bytes']
+    except (IndexError, KeyError):
+        return {}
+    return json.loads(raw) if raw else {}
+
+
+def dominant_kind(kinds: dict, kind_bytes: dict):
+    """The kind a place is mostly made of, by weight and count together, with its share."""
+    score = content_shares(kinds, kind_bytes)
+    if not score:
+        return None, 0.0
+    k = max(score, key=score.get)
+    return k, score[k]
+
+
+def content_shares(kinds: dict, kind_bytes: dict) -> dict:
+    """Share of each kind in a place: count (log-compressed, so variety shows) weighted by
+    its share of the bytes. A film folder is video, not its eight subtitle files."""
+    kinds = kinds or {}
+    total_b = sum((kind_bytes or {}).values())
+    out = {}
+    for k, n in kinds.items():
+        if not n:
+            continue
+        b = (kind_bytes or {}).get(k, 0)/total_b if total_b > 0 else 1.0/len(kinds)
+        out[k] = math.log1p(n)*math.sqrt(b+0.05)
+    t = sum(out.values())
+    return {k: v/t for k, v in out.items()} if t > 0 else {}
 
 
 def weight_of(files, dirs, scanned=True):
@@ -654,6 +706,7 @@ class World:
                 c[key] = r[key]
             c['scanned'] = bool(r['scanned'])
             c['kinds'] = json.loads(r['kinds']) if r['kinds'] else {}
+            c['kind_bytes'] = _kind_bytes(r)
 
     def _invalidate(self, bbox):
         self.serial += 1
@@ -693,6 +746,7 @@ class World:
                     c[key] = r[key]
                 c['scanned'] = bool(r['scanned'])
                 c['kinds'] = json.loads(r['kinds']) if r['kinds'] else {}
+                c['kind_bytes'] = _kind_bytes(r)
             known = {c['id'] for c in t.children}
             if any(r['is_dir'] and not r['link'] and r['id'] not in known for r in rows):
                 stale_shape = True
@@ -916,6 +970,7 @@ class World:
                              'error': r['error'], 'files': r['files'], 'dirs': r['dirs'], 'bytes': r['bytes'],
                              'newest': r['newest'], 'mtime': r['mtime'], 'day': r['day'], 'week': r['week'],
                              'kinds': json.loads(r['kinds']) if r['kinds'] else {}, 'unscanned': r['unscanned'],
+                             'kind_bytes': _kind_bytes(r),
                              'centroid': centroid, 'area': c*cell*cell, 'side': math.sqrt(c)*cell,
                              'bbox': (mx.min()*cell+x0, my.min()*cell+y0, (mx.max()+1)*cell+x0, (my.max()+1)*cell+y0),
                              'outlet': child_outlet, 'weight': float(weights[i+1])})
@@ -924,10 +979,14 @@ class World:
                       continental=continental, zone=zone, writable=writable, rivers=[], places={}, node=node, sig=sig,
                       version=self.index.version)
         t.child_by_label = {c['label']: c for c in children}
+        t.uniform = self._uniform(children)
         if continental:
             # Distance to the coastline from either side: beaches on land, depth at sea.
             land = (labels != SEA) & (labels != OUT)
-            t.sea_dist = (ndimage.distance_transform_edt(land) + ndimage.distance_transform_edt(~land)).astype(np.float32)
+            # Signed distance to the coastline (cells): positive on land, negative at sea, zero on
+            # the line between a land cell and a sea cell, so coastal slopes can vanish there.
+            t.sea_dist = np.where(land, ndimage.distance_transform_edt(land)-0.5,
+                                  -(ndimage.distance_transform_edt(~land)-0.5)).astype(np.float32)
         t.node = dict(t.node, home_weight=float(weights[0]))
         if overflow:
             t.node = dict(t.node, overflow=len(overflow))
@@ -950,6 +1009,23 @@ class World:
         t.rivers, t.lakes = self._rivers(t, drain)
         t.places = self._places(t, files, labels, cell)
         return t
+
+    @staticmethod
+    def _uniform(children):
+        """A library: eight or more subfolders, at least 70% of them made mostly of one kind
+        (a film per folder, an album per folder). Drawn as one landscape of that kind with a
+        landform per subfolder, instead of a patchwork of provinces."""
+        if len(children) < 8:
+            return None
+        votes = {}
+        for c in children:
+            k, share = dominant_kind(c['kinds'], c.get('kind_bytes'))
+            if k is not None and k not in ('other', 'folders') and share >= 0.5:
+                votes[k] = votes.get(k, 0)+1
+        if not votes:
+            return None
+        k = max(votes, key=votes.get)
+        return k if votes[k] >= 0.7*len(children) else None
 
     def _mounts(self, node, subdirs) -> int:
         return sum(1 for r in subdirs if os.path.ismount(r['path'])) if node['path'].count('/') <= 2 else 0
@@ -994,7 +1070,8 @@ class World:
                     return k
                 return int(cells[np.argmin((cells % n+0.5-(point[0]-t.x0)/cell)**2+(cells // n+0.5-(point[1]-t.y0)/cell)**2)])
             sources = [(t.capital, cell_of(t.capital), t.node.get('home_weight', 1.0))]
-            for c in sorted(same, key=lambda c: -c['weight'])[:400]:
+            # A library is one landscape: its members don't each send a stream.
+            for c in ([] if t.uniform else sorted(same, key=lambda c: -c['weight'])[:400]):
                 sources.append((c['outlet'], cell_of(c['outlet']), c['weight']))
             flow = np.zeros(n*n)
             for _, start, f in sources:
@@ -1026,13 +1103,13 @@ class World:
                     p, w = _follow_borders(t, p, w)
                     rivers.append({'pts': p, 'w': w, 'kind': 'stream', 'child': None})
             river_cells = claimed & (flow >= total*0.02)
-            if len(t.children) >= 6:
+            if len(t.children) >= 6 and not t.uniform:
                 # Where many streams meet, they pool: a lake at the capital of a hub.
                 lakes.append({'x': t.capital[0], 'y': t.capital[1],
                               'r': 0.012*side*min(1.0, math.sqrt(len(t.children)/40)), 'seed': stable_hash(t.path+'lake')})
         # Ridges part where rivers run: distance to the main channels, in cells.
         t.river_dist = ndimage.distance_transform_edt(~river_cells.reshape(n, n)).astype(np.float32) if river_cells.any() else None
-        for c in t.children:
+        for c in ([] if t.uniform else t.children):
             # Each subfolder's own course, drawn until that place shows its own network.
             wc = 0.02*c['side']
             pts = _meander(c['centroid'], c['outlet'], stable_hash(c['path']+'upper'), 0.16, 10)
@@ -1096,11 +1173,26 @@ class World:
         sub_area = (cell/f)**2
         files = sorted(files, key=lambda r: r['name'].casefold())
         kinds = [r['kind'] or 'other' for r in files]
+        sizes = np.array([r['size'] or 0 for r in files], dtype=np.float64)
+        # Companions: in a folder that is clearly one thing (a film, an album), the small
+        # unclassified files beside it (subtitles, .nfo, a poster) join its patch as plain
+        # ground instead of forming a patch of their own.
+        counts, weight = {}, {}
+        for kd, sz in zip(kinds, sizes):
+            counts[kd] = counts.get(kd, 0)+1
+            weight[kd] = weight.get(kd, 0)+float(sz)
+        dom, share = dominant_kind(counts, weight)
+        companion = np.zeros(count, dtype=bool)
+        if dom not in (None, 'other', 'folders') and share >= 0.5:
+            for i, kd in enumerate(kinds):
+                if kd == 'other' or (kd in ('images', 'documents') and counts[kd] <= 3 and dom != kd):
+                    companion[i] = True
+        layout_kind = [dom if companion[i] else kd for i, kd in enumerate(kinds)]
         groups = {}
-        for i, kd in enumerate(kinds):
+        for i, kd in enumerate(layout_kind):
             groups.setdefault(kd, []).append(i)
         names = sorted(groups)
-        sizes = np.array([r['size'] or 0 for r in files], dtype=np.float64)
+        landmarks = int((~companion).sum())
         # Patch seeds: toward the child richest in that kind, else a stable spot.
         seeds = []
         for kd in names:
@@ -1111,7 +1203,9 @@ class World:
                 target = pts[stable_hash(t.path+kd) % len(pts)]
             seeds.append(pts[np.argmin(((pts-target)**2).sum(axis=1))]+(np.array([stable_hash(kd) % 97, stable_hash(kd) % 89])/1e3-0.045)*cell)
         seeds = np.array(seeds)
-        weights = np.array([len(groups[kd]) for kd in names], dtype=np.float64)
+        # Patch area follows size as well as count (compressed): a film's video outweighs its
+        # eight subtitle files, a folder of tiny scripts still gets its town.
+        weights = np.array([np.sum((sizes[groups[kd]]+1)**0.3) for kd in names], dtype=np.float64)
         span = math.sqrt(len(pts)*sub_area)
         wx = fbm(pts[:, 0], pts[:, 1], 3.0/span, 3, stable_hash(t.path+'patch') & 0xFFFF)*span*0.08
         wy = fbm(pts[:, 0], pts[:, 1], 3.0/span, 3, (stable_hash(t.path+'patch') >> 16) & 0xFFFF)*span*0.08
@@ -1154,12 +1248,14 @@ class World:
             R[members] = math.sqrt(area/m/math.pi)
             # Landmarks (peaks, mesas, calderas) keep to the size they would have among eight
             # neighbours: in a sparse folder a file owns a wide parcel, not a giant mountain.
-            RF[members] = min(R[members[0]], math.sqrt(len(pts)*sub_area/(8*math.pi)))
+            RF[members] = min(R[members[0]], math.sqrt(len(pts)*sub_area/(min(8, max(4, landmarks))*math.pi)))
             patch[members] = pi
-            patches.append({'kind': kd, 'n': m, 'x': float(region[:, 0].mean()), 'y': float(region[:, 1].mean()),
-                            'side': math.sqrt(area), 'bytes': float(sizes[members].sum())})
+            primary = int((~companion[members]).sum())
+            patches.append({'kind': kd, 'n': primary, 'companions': m-primary, 'x': float(region[:, 0].mean()),
+                            'y': float(region[:, 1].mean()), 'side': math.sqrt(area), 'bytes': float(sizes[members].sum())})
         return {'n': count, 'ids': [r['id'] for r in files], 'names': [r['name'] for r in files], 'paths': [r['path'] for r in files],
-                'kinds': kinds, 'x': X, 'y': Y, 'r': R, 'rf': RF, 'size': sizes, 'patch': patch, 'patches': patches,
+                'kinds': kinds, 'layout_kinds': layout_kind, 'companion': companion,
+                'x': X, 'y': Y, 'r': R, 'rf': RF, 'size': sizes, 'patch': patch, 'patches': patches,
                 'mtime': np.array([r['mtime'] or 0 for r in files]), 'attrs': np.array([r['attrs'] or 0 for r in files]),
                 'link': [bool(r['link']) for r in files], 'is_dir': [bool(r['is_dir']) for r in files]}
 

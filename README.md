@@ -45,6 +45,7 @@ The lightweight terminal companion is `./branch /path`. Press `?` there for cont
 | Backspace · Home | Up to the enclosing place · the whole world |
 | WASD / arrows · Q/E · PgUp/PgDn | Pan · turn · tilt |
 | G · K · R · L · F · I | Gazetteer · legend · weather radar · labels · map only · collapse notes |
+| V · M | Perspective (Civ V-like) or flat map · 3D trees, houses and boulders |
 | Ctrl+P · Ctrl+L | Bash navigation palette · type a path |
 | Space · F2 · Delete · Ctrl+C/X/V · Ctrl+Z · Ctrl+Shift+N | Peek · rename · trash · copy/cut/paste · undo · new folder |
 
@@ -95,6 +96,7 @@ slider, and page-count mountains.
 | World layout: power-diagram territories, fractal borders, rivers, landmarks | `branchfm/world.py` |
 | Terrain synthesis: 257² height/colour/aux/material tiles at any zoom; fields, rivers, lakes, deltas | `branchfm/tiles.py` |
 | CC0 ground textures (Poly Haven) and their baker | `native/textures/`, `tools/fetch_textures.py` |
+| 3D landmarks: procedural low-poly meshes, GPU-instanced per tile | `native/models.gd`, `native/instances.gdshader` |
 | Map service: tiles (worker processes), labels, picking, survey status | `branchfm/atlas_api.py`, `branchfm/service.py` |
 | Native client: streaming terrain, floating origin, overlays | `native/main.gd`, `native/terrain.gdshader` |
 

@@ -58,7 +58,10 @@ def kind_of(name, is_dir):
         return 'code'
     if ext in {'.zip','.tar','.gz','.tgz','.bz2','.xz','.7z','.rar','.zst','.jar','.whl'}:
         return 'archives'
-    if ext in {'.exe','.dll','.so','.o','.a','.lib','.pyc','.class','.wasm','.msi','.sys','.dylib','.bin','.elf'}:
+    # Compiled caches (.pyc, .class) are neither programs nor content: plain ground.
+    if ext in {'.pyc','.pyo','.class'}:
+        return 'other'
+    if ext in {'.exe','.dll','.so','.o','.a','.lib','.wasm','.msi','.sys','.dylib','.bin','.elf'}:
         return 'binaries'
     if ext in {'.iso','.img','.vhd','.vhdx','.vmdk','.qcow2','.vdi','.dmg'}:
         return 'disks'

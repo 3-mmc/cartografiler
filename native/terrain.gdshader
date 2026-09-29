@@ -38,6 +38,33 @@ float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// Gradient noise and its slope, for relief finer than a tile sample.
+vec2 hash2(vec2 p) {
+	p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+	return fract(sin(p) * 43758.5453) * 2.0 - 1.0;
+}
+
+float gnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * (3.0 - 2.0 * f);
+	return mix(mix(dot(hash2(i), f), dot(hash2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
+	           mix(dot(hash2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), dot(hash2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
+}
+
+vec2 micro_slope(vec2 p) {
+	// Three octaves of slope (d height / d uv), by central differences.
+	vec2 g = vec2(0.0);
+	float amp = 1.0;
+	for (int o = 0; o < 3; o++) {
+		float e = 0.02;
+		g += amp * vec2(gnoise(p + vec2(e, 0.0)) - gnoise(p - vec2(e, 0.0)), gnoise(p + vec2(0.0, e)) - gnoise(p - vec2(0.0, e))) / (2.0 * e);
+		p = p * 2.07 + vec2(17.3, 9.1);
+		amp *= 0.5;
+	}
+	return g;
+}
+
 float vnoise(vec2 p) {
 	vec2 i = floor(p);
 	vec2 f = fract(p);
@@ -88,12 +115,21 @@ void fragment() {
 		float k = clamp(total, 0.0, 1.0) * (1.0 - water);
 		albedo *= 1.0 + detail_strength * 2.0 * lum * k;
 		n = normalize(n + vec3(bump.x, 0.0, -bump.y) * 0.4 * k);
+		// Micro-relief below the tile's sample spacing, drawn here at screen resolution:
+		// rough on rock, soft on fields and water-smoothed ground. Same world-anchored
+		// frames as the detail textures, so it neither swims nor jumps while zooming.
+		float rough = dot(wa, vec4(0.35, 0.55, 0.12, 0.2)) + dot(wb, vec4(0.15, 0.3, 1.0, 0.25));
+		vec2 s0 = micro_slope(uv0 * 6.0);
+		vec2 s1 = micro_slope(uv1 * 6.0);
+		vec2 slope = mix(s0, s1, detail_mix) * rough / max(total, 0.001);
+		n = normalize(n + vec3(-slope.x, 0.0, -slope.y) * 0.06 * k);
 	}
 
 	// Water: gloss, a little depth tint, and slow ripples.
 	if (water > 0.0) {
 		vec2 p = world_pos.xz * 0.9 + vec2(time_s * 0.05, time_s * 0.03);
-		vec2 ripple = vec2(vnoise(p * 3.0) - 0.5, vnoise(p * 3.0 + 17.0) - 0.5) * 0.12;
+		// Open ocean is calm, like the plane beyond the world's edge; rivers and shallows ripple.
+		vec2 ripple = vec2(vnoise(p * 3.0) - 0.5, vnoise(p * 3.0 + 17.0) - 0.5) * 0.12 * (1.0 - 0.9 * aux.b);
 		n = normalize(mix(n, normalize(vec3(ripple.x, 1.0, ripple.y)), water));
 		albedo = mix(albedo, albedo * vec3(0.85, 0.95, 1.0), water * aux.b);
 	}
@@ -110,6 +146,6 @@ void fragment() {
 
 	ALBEDO = albedo;
 	NORMAL = normalize((VIEW_MATRIX * vec4(n, 0.0)).xyz);
-	ROUGHNESS = mix(0.92, 0.18, water);
-	SPECULAR = mix(0.25, 0.55, water);
+	ROUGHNESS = mix(0.92, 0.45, water);
+	SPECULAR = mix(0.25, 0.3, water);
 }

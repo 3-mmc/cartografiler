@@ -20,6 +20,9 @@
 - **Terrain** `branchfm/tiles.py`: 257² edge-inclusive tiles, format `BTL2` (float32 heights relative to tile base + RGBA colour + RGBA aux: rain, fog, depth, ridge + two RGBA material-weight maps), rendered in a spawn process pool (`atlas_api.py`). Client streams `/tile`, `/places`, `/at`, `/region`, `/status`. About 0.3–0.5 s per tile per worker.
 - **Fields** (`World._places`, `Synth._fields`): a folder's own files are one patch per kind (power diagram over home sub-cells, seeded toward the child richest in that kind) and one Lloyd-relaxed parcel per file, alphabetical across the patch. Rendered by nearest-two-sites lookup (parcel edge = distance to the bisector).
 - **Rivers** (`World._rivers`): a Dijkstra tree from the outlet over land, cheap along borders and home, dear across interiors; widths ∝ √flow; streams bent by the same warp as borders (`_follow_borders`); ridges gated off near them (`Territory.river_dist`). Hub lakes (≥ 6 subfolders), falls (zone/permission change), deltas at each disk's mouth (root only).
+- **3D landmarks:** `Synth._instances` emits per-tile instances (tile format `BTL3`: after the material maps, a uint32 count and 24-byte records u, v, height/S, size/S as float32 + kind, yaw, RGB bytes). Kinds: broadleaf, conifer, house, boulder; meshes are built procedurally in `native/models.gd`, drawn by `native/instances.gdshader` (skip_vertex_transform; the instance transform carries tile-relative position/rotation/size so float32 keeps precision). Only tiles at the current level show models.
+- **Camera:** perspective, 38° horizontal FOV, default tilt 50° (Civ V-like); `V` toggles the orthographic map view, `M` toggles models. Tile coverage uses the view's ground footprint (`view_bbox`).
+- **Libraries** (`World._uniform`) and **bytes per kind** (`nodes.kind_bytes`, migrated by re-settling every folder, ≈25 s for 461 k folders): shares via `world.content_shares`.
 - **Materials:** CC0 Poly Haven textures in `native/textures/` (baked by `tools/fetch_textures.py`, loaded at runtime into a `Texture2DArray`; `.gdignore` keeps Godot from importing them).
 - **Client** `native/main.gd` + `native/terrain.gdshader`: floating origin (100 render units across the view at any zoom, world coords in doubles), orthographic tilted camera, per-pixel normals from the height texture.
 - Shared filesystem operations: `branchfm/model.py`. Previews: `branchfm/preview.py`. Per-file metadata: `branchfm/atlas.py` (not yet wired into the continuous map).
@@ -41,6 +44,11 @@
 - Civilization V lessons applied (visual review of store screenshots only): the grid is only an overlay on continuous terrain; features fill their unit and merge with like neighbours; improvements are patchworks; rivers run between units, not through them.
 - **Ctrl+P** Bash palette runs only explicitly submitted commands, as the user; output paths become fly-to destinations.
 
+## Repository
+
+- GitHub: `https://github.com/3-mmc/cartografiler` (private). This machine's SSH key is not registered with GitHub; push over HTTPS with the gh token without touching global config: `git -c credential.helper= -c credential.helper='!gh auth git-credential' push`.
+- Commits are authored as the user (`git -c user.name=... -c user.email=...`, as in earlier commits); the repository has no local identity configured.
+
 ## Validation and constraints
 
 ```bash
@@ -54,6 +62,9 @@ python3 -m unittest discover -s tests -v
 - GDScript's `%` formatting has no `%g`: use `String.num_scientific()` for world coordinates (full double precision).
 - Height terms that differ across a border must vanish at the border (b = 0), and nested detail must fade out at its container's border. Violations showed up as 100:1 cliff walls at deep zoom. `test_terrain_has_no_cliffs` guards this.
 - Rivers run along borders (valleys between provinces), never straight through interiors; upper courses are clipped to their child until it draws its own network. Draw widths through `Synth.symbol_width` (true width to 6 px, then ∝ zoom^0.28): true-width ancestor rivers became screen-wide bands at deep zoom.
+- Coastal heights use `coast_distance`: the smooth signed distance to the coast, looked up through the same warp as `label_at` and scaled by the four-cell land vote (bilinear of the clipped ±0.5 indicator), so it is exactly zero where the map draws the coast. Ridges fade toward the sea. An unwarped, always-positive sea distance plus ridges peaking on the coast made 100:1 walls beside Kino (`test_coast_distance_agrees_with_labels`).
+- Labels are placed at their own terrain height (`height_at`), not the view's reference height: on a tilted view they slid onto neighbouring places.
+- Terrain never carries building heights: houses are 3D models. Raised lots on wide parcels became pillars.
 - Bump `LAYOUT_VERSION` in `world.py` whenever layout output changes; the signature includes it, so cached territories in `layout.sqlite` are recomputed.
 - Height terms that are lit must use `GridNoise.smooth`/`smooth_fbm` (C2 B-spline) and B-spline raster sampling (`sea_distance`): bilinear value noise and bilinear distance fields showed as square facets in the hillshade. `GridNoise.value`/`value_noise` stay bilinear because border warps must match between layout (pointwise) and render (grid).
 - Parcel heights fade within half a cell of the home district's border (the border field is only cell-accurate), and file sites are kept out of that band (`label_at` gap > 0.6 cell); colours do not fade.

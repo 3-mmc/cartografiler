@@ -133,8 +133,33 @@ next. Each **kind forms one patch**; each **file is one parcel** of its patch.
 | Documents | meadow | meadow in flower, dry-stone walls between |
 | Anything else | scrub | scrub with a cairn |
 
-Landmarks (peaks, mesas, calderas) keep to the size they would have among eight
-neighbours, so a file in a sparse folder owns a wide parcel, not a giant mountain. Video is
+Landmarks (peaks, mesas, calderas) keep to the size they would have among four to
+eight neighbours, so a file in a sparse folder owns a wide parcel, not a giant mountain.
+
+**Weight, not just count.** What a place is made of is its file count (log-compressed, so
+variety shows) weighted by each kind's share of the bytes. A film folder is video, not its
+eight subtitle files. **Companions**: in a folder that is clearly one thing, small
+unclassified files beside it (subtitles, `.nfo`, a poster) are plain ground in the main
+patch, without landmarks or labels of their own. Compiled caches (`.pyc`, `.class`) are
+plain ground, not programs.
+
+### Libraries
+
+A folder whose subfolders are mostly one kind (eight or more, 70% of them) is a
+**library**: a film collection, a set of albums, a photo archive by year. It is drawn as one
+landscape of that kind, with no divides, streams or lakes between its members, and each
+member stands as a single landform: a mesa per film, a wood per album of photos, a peak per
+PDF collection. As you approach, each landform hands over to that member's own fields.
+Places named on the map carry what they are when it is clear: *"Kino, video library ·
+55 videos"*.
+
+### 3D landmarks
+
+Trees, houses and boulders are low-poly models built in the client, instanced on the GPU:
+trees where the ground is clearly forest, houses on town ground (lined up with the lots of a
+town of files), boulders on bare rock. Like Civilization V's trees they are map symbols, a
+few pixels to a dozen across at every zoom, so a forest reads as a wood and a code folder as
+a village. `M` hides them. Video is
 no longer water: water is structure (drainage), and a landform that means "content" must not
 borrow it.
 
@@ -173,6 +198,12 @@ pending:
 - **Geysers** for files changed in the last 15 minutes, **arches** for symlinks, and
   **canyons** for deeply branching folders.
 
+## Camera
+
+A perspective camera at 50° by default, as in Civilization V (about 45–50°), so the land
+recedes toward the horizon; `V` switches to the flat, orthographic map view. Tilt is
+adjustable (right-drag, PgUp/PgDn; at least 35° in perspective).
+
 ## Materials
 
 Ground detail comes from CC0 aerial and ground textures (Poly Haven; see
@@ -181,7 +212,8 @@ luminance-detail maps. They never set colour: the synthesised colour carries mea
 texture only grain and relief. Each tile carries per-pixel weights for eight materials
 (meadow, forest, field, town, wet, snow, rock, sand), and the shader samples each at two
 world-anchored scales an octave apart, cross-faded with zoom, so the grain looks the same
-at every height.
+at every height. Relief finer than eight tile samples is drawn by the GPU too (gradient-noise
+micro-relief, rough on rock, smooth on fields), at screen resolution.
 
 ---
 
