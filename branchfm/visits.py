@@ -1,4 +1,4 @@
-"""Where you actually go. Branch counts the places you enter or open, so frequent routes
+"""Where you actually go. Cartografiler counts the places you enter or open, so frequent routes
 wear into roads, like desire paths across grass. Stored locally; never shared."""
 from __future__ import annotations
 

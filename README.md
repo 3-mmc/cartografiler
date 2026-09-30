@@ -1,28 +1,43 @@
-# Branch Atlas
+# Cartografiler
 
 A native, local file manager in which your whole filesystem is **one continuous world
 map**. Each disk is a continent. Every folder owns a territory sized by what it holds,
 rivers run down the valleys between folders toward the parent and on to a delta, land cover
 follows content, and a folder's own files lie as fields: one patch per kind (a forest of
 images, a town of source files, a massif of PDFs), one parcel per file.
-The geography is continuous and irregular, with no tiles, board or grid.
+The geography is continuous and irregular, with no visible board or regular grid.
+Its visual direction draws on Civilization V map visuals: blended terrain, clustered
+settlements, rivers between territories, and a tilted perspective camera.
 
-## Run on this machine
+## Run
+
+From the repository on Linux (or WSL with WSLg), install Python 3.11+ dependencies and
+put the official Godot 4.7.2 stable Linux x86_64 binary in
+`tools/Godot_v4.7.2-stable_linux.x86_64`:
 
 ```bash
-branch-atlas                  # the world, starting over your home folder
-branch-atlas /mnt/e/Photos    # start over any folder
-~/branch/atlas demo           # synthetic demo folder
+python3 -m pip install -e '.[images,performance]'
+./cartografiler "$HOME"        # start over your home folder
+./cartografiler /              # the whole world
+./cartografiler /path/to/folder # start over any folder
+./cartografiler demo            # explicitly synthetic demo files
 ```
 
-It opens a native **Godot window through WSLg**, rendered on the **GTX 1080** (the
-launcher sets `GALLIUM_DRIVER=d3d12`; without it WSLg falls back to CPU rendering). A
-**Branch Atlas** entry is also in the Windows Start menu. Python starts a private,
+The installed `cartografiler` command opens the same native Godot application.
+NumPy and SciPy are required; Pillow enables image previews, while optional Numba and
+Zstandard accelerate noise generation and tile compression. Without the performance
+extras, NumPy and deflate provide the fallbacks. The existing `./atlas` launcher and
+`./branch` terminal companion remain available for compatibility.
+
+On WSLg, the launcher selects Mesa's D3D12 driver when available to use the GPU.
+On native Linux it uses the existing graphics configuration. Python starts a private,
 authenticated loopback service and shuts it down when the window closes. No files are
 uploaded.
 
 The first launch surveys the filesystem in the background. On this machine that's 3.65 M
-files and 461 k folders across every drive, in about 16 minutes. The map is usable from
+files and 461 k folders across every drive, in about 16 minutes (a prior WSL benchmark;
+your timing depends on the filesystem). Native Linux data disks, including mounts under
+`/media` and `/run/media`, are discovered as separate continents. The map is usable from
 the first seconds and fills in coarse to fine; unsurveyed places are parchment. To survey
 ahead of time from a terminal:
 
@@ -32,7 +47,10 @@ python3 -m branchfm.index /mnt/d     # one drive
 ```
 
 The index lives in `~/.local/share/branch/index.sqlite` (about 1.3 GB for this machine),
-with laid-out territories cached next to it in `layout.sqlite`. Both are rebuilt if deleted.
+with laid-out territories in `layout.sqlite` and rendered tiles in `tiles.sqlite` next
+to it. These caches persist between sessions and are rebuilt if deleted. Tile cache
+entries expire with time-sensitive features and are invalidated by survey changes.
+The legacy `branch` data directory is retained so existing indexes and trash stay usable.
 
 The lightweight terminal companion is `./branch /path`. Press `?` there for controls.
 
@@ -70,8 +88,12 @@ files are not loaded.
 
 ## Reading the map
 
+Link-heavy folders form aqueduct arcades. Source-file towns grow along riverbanks and
+can bridge crossings. Terrain streams coarse to fine with completed fine tiles masking
+their fallback coverage, and picking requests remain responsive during tile loading.
+
 The grammar and its reasoning are in **[docs/cartography.md](docs/cartography.md)** and in
-the app (`K`). In short: continents are disks, climate is the filesystem and write
+the app (`K`). Continents are disks, climate is the filesystem and write
 permission, territory is size, water flows toward the parent (tributaries, hub lakes,
 waterfalls where the ground changes, deltas at the sea), land cover is content, files are
 fields, rock is age (basalt → sandstone → granite), snow is dormancy, and the optional radar
@@ -85,7 +107,7 @@ slider, and page-count mountains.
   listings, DOCX text, PPTX slide text and raw XLSX values are previewed in bounded
   subprocesses that never execute file contents.
 - Rename, new folder, copy, cut/paste (into the place you are over), recoverable trash, and
-  undo of moves/renames/trash. Existing destinations are refused. Trash is Branch's own
+  undo of moves/renames/trash. Existing destinations are refused. Trash is Cartografiler's own
   store under `~/.local/share/branch/trash`, not the Windows Recycle Bin.
 
 ## Architecture
@@ -111,13 +133,13 @@ place's interior, and cached on disk.
 python3 -m unittest discover -s tests -v
 ./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --script res://tests/streaming.gd
 ./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --editor --import --quit
-./atlas / --smoke --capture /tmp/world.png
-./atlas / --smoke --capture /tmp/home.png --enter /home/praetor
+./cartografiler / --smoke --capture /tmp/world.png
+./cartografiler / --smoke --capture /tmp/home.png --enter "$HOME"
 ```
 
 ## References
 
-- [Conrad Barski's spatial file-browser clip](https://x.com/lisperati/status/2104681013909893184): the original inspiration.
+- [Civilization V map visuals and official screenshots](https://store.steampowered.com/app/8930/Sid_Meiers_Civilization_V/): terrain blending, clustered improvements, rivers along borders, and the perspective camera. Cartografiler uses generated geometry and CC0 materials.
 - [Mach Speed Intercept](https://store.steampowered.com/app/3438610/Mach_Speed_Intercept/): continuous relief, restrained materials, free camera movement. All geometry and colour here are generated; no game assets are used.
 
 Project-specific agent instructions, machine paths, and accepted design constraints are in `AGENTS.md`.

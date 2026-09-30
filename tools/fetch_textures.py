@@ -32,7 +32,7 @@ SIZE = 512
 
 
 def get(url: str) -> bytes:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'branch-atlas'}), timeout=60) as r:
+    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'Cartografiler'}), timeout=60) as r:
         return r.read()
 
 

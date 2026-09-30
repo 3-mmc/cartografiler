@@ -394,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def launch():
     import argparse
-    parser = argparse.ArgumentParser(description='Branch Atlas — native 3D file manager')
+    parser = argparse.ArgumentParser(description='Cartografiler — native 3D file manager')
     parser.add_argument('path',nargs='?',default='.')
     parser.add_argument('--smoke',action='store_true')
     parser.add_argument('--capture',default='')

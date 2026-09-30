@@ -1,10 +1,10 @@
-# Branch Atlas — project instructions
+# Cartografiler — project instructions
 
 ## Location and entry points
 
-- Working directory: `/home/praetor/branch` (WSL Debian on the user's Windows machine).
-- Main product: a native Godot file manager showing the **whole filesystem as one continuous world map**, launched with `./atlas [/path/to/start]` (`./atlas /` for the world view).
-- Convenience launchers: `~/.local/bin/branch-atlas` and `~/.local/bin/branch-fm`. Desktop entry: `~/.local/share/applications/branch-atlas.desktop` (starts in `/home/praetor`).
+- Working directory: `/home/calomel/Projekte/cartografiler`; original WSL checkout: `/home/praetor/branch`.
+- Main product: a native Godot file manager showing the **whole filesystem as one continuous world map**, launched with `./cartografiler [/path/to/start]` (`./cartografiler /` for the world view); `./atlas` is a compatibility alias.
+- Legacy WSL convenience launchers: `~/.local/bin/branch-atlas` and `~/.local/bin/branch-fm`. Desktop entry: `~/.local/share/applications/branch-atlas.desktop` (starts in `/home/praetor`).
 - Terminal companion: `./branch /path/to/folder`.
 - `python3 -m branchfm.demo` creates explicitly synthetic demo files; `./atlas demo` starts over them.
 - Survey from a terminal: `python3 -m branchfm.index /` (or a path).
@@ -34,7 +34,7 @@
 
 ## Accepted product direction
 
-- The original inspiration is Conrad Barski's spatial branching file browser: https://x.com/lisperati/status/2104681013909893184 .
+- The visual inspiration is Civilization V map visuals: continuous terrain, clustered improvements, rivers along borders, and a tilted camera. Reference screenshots: https://store.steampowered.com/app/8930/Sid_Meiers_Civilization_V/ .
 - **One continuous, already-browsable world built from a persistent index** (accepted 2026-09-29): no per-directory islands dropped onto a map. Features blend into one another as in Civilization V and Mach Speed Intercept.
 - **Continents are disks** (user's choice, 2026-09-29): the Linux disk and each drive are separate landmasses across sea; below that, provinces share land borders. Do not turn large folders into archipelagos (tried; it read as cracked tiles).
 - **Do not build a regular board of equal-sized hex/square tiles.** Geography is amorphous, expansive, less cartoonish, visually informed by **Mach Speed Intercept**'s map view (continuous satellite-like ground, dark ridges with strong shadows, restrained palette). Reference install: `/mnt/e/SteamLibrary/steamapps/common/Mach Speed Intercept Playtest`; screenshots via the Steam API for app 3438610. Never lift game assets.
@@ -75,5 +75,5 @@ python3 -m unittest discover -s tests -v
 - Don't `pkill -f` with a pattern that appears in your own command line: it kills the calling shell (exit 144).
 - `ERR_CANT_OPEN` from `audio_driver_alsa` in windowed runs is WSLg having no ALSA device; harmless.
 - Preview/metadata workers are bounded subprocesses. Never execute a file's contents to preview it.
-- File operations refuse collisions. Trash is Branch's own recoverable store under `$XDG_DATA_HOME/branch/trash`, not the Windows Recycle Bin. Undo covers moves/renames/trash within a session, not copies or mkdir.
+- File operations refuse collisions. Trash is Cartografiler's own recoverable store under `$XDG_DATA_HOME/branch/trash`, not the Windows Recycle Bin. Undo covers moves/renames/trash within a session, not copies or mkdir.
 - Cloud tides: `branchfm/cloud.py` reads sync roots from `HKLM\...\Explorer\SyncRootManager`; the survey's Windows worker records `st_file_attributes` per entry (`nodes.attrs`), which is what the continuous-map tides will use. Never hydrate files.

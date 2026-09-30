@@ -1,1 +1,1 @@
-"""Branch: a spatial terminal file manager."""
+"""Cartografiler: a spatial terminal file manager."""

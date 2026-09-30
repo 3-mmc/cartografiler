@@ -1,6 +1,6 @@
 # The cartographic grammar
 
-Branch Atlas replaces the desktop metaphor with a map. A metaphor is only useful
+Cartografiler replaces the desktop metaphor with a map. A metaphor is only useful
 if it can be *read*, so each natural system answers exactly one question about the
 filesystem and never borrows another system's meaning.
 

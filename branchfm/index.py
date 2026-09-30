@@ -1,6 +1,6 @@
 """The survey: a persistent index of the filesystem that the world map is drawn from.
 
-The map must exist before you visit a place, so Branch keeps an SQLite index of every
+The map must exist before you visit a place, so Cartografiler keeps an SQLite index of every
 directory and file it has surveyed and fills it in coarse-to-fine: a breadth-first crawl,
 one directory at a time, from a priority queue. Whatever you are looking at jumps the
 queue. Each filesystem is crawled natively: Linux paths with os.scandir in WSL, Windows
@@ -436,7 +436,7 @@ class Surveyor(threading.Thread):
 def main():
     """Survey from the command line: python3 -m branchfm.index [PATH ...] (default: everything)."""
     import argparse
-    parser = argparse.ArgumentParser(description='Build or refresh the Branch Atlas survey index')
+    parser = argparse.ArgumentParser(description='Build or refresh the Cartografiler survey index')
     parser.add_argument('paths', nargs='*', default=['/'])
     parser.add_argument('--index', default=None)
     args = parser.parse_args()

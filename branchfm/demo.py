@@ -17,7 +17,7 @@ def make_pdf(path, pages):
         page_id = len(objects)+1
         kids.append(f'{page_id} 0 R')
         objects.append(f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 420] /Resources << /Font << /F1 3 0 R >> >> /Contents {page_id+1} 0 R >>'.encode())
-        text = f'BT /F1 14 Tf 25 360 Td (Branch Atlas - synthetic sample) Tj 0 -25 Td (Page {i+1} of {pages}) Tj ET'.encode()
+        text = f'BT /F1 14 Tf 25 360 Td (Cartografiler - synthetic sample) Tj 0 -25 Td (Page {i+1} of {pages}) Tj ET'.encode()
         objects.append(f'<< /Length {len(text)} >>\nstream\n'.encode()+text+b'\nendstream')
     objects[1] = f'<< /Type /Pages /Kids [{" ".join(kids)}] /Count {pages} >>'.encode()
     document = bytearray(b'%PDF-1.4\n')
@@ -120,7 +120,7 @@ def create_demo(root: Path):
         for i in range(12):
             (code/'route.py').write_text(f'"""Synthetic route planning sample, revision {i}."""\n\ndef distance(a, b):\n    return sum((x-y)**2 for x, y in zip(a, b)) ** 0.5\n')
             run('add','route.py','settings.json')
-            run('-c','user.name=Branch demo','-c','user.email=demo@example.invalid','commit','-qm',f'Synthetic revision {i}')
+            run('-c','user.name=Cartografiler demo','-c','user.email=demo@example.invalid','commit','-qm',f'Synthetic revision {i}')
         (code/'settings.json').write_text('{"climate":"temperate","labels":true,"camera":"orthographic","draft":true}\n')
     # Symbolic link: a natural arch.
     link = root/'Shortcut to the library'

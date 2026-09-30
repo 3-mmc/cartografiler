@@ -1,5 +1,5 @@
 extends Node3D
-# Branch Atlas: one continuous world drawn from the survey index. The map is streamed as
+# Cartografiler: one continuous world drawn from the survey index. The map is streamed as
 # terrain tiles at the level of detail the view needs; every overlay (cartouche, field
 # notes, gazetteer, legend, palette) is translucent and appears when relevant.
 # The cartographic grammar is in docs/cartography.md.
@@ -1613,8 +1613,8 @@ func ask_action(action: String):
 	if action != "mkdir" and selected.is_empty(): return
 	pending_action = action
 	dialog_source = current_path() if action == "mkdir" else selected.path
-	dialog.title = {"rename":"Rename", "mkdir":"New folder in "+current_path().get_file(), "trash":"Move to Branch trash?"}[action]
-	dialog.dialog_text = ("“%s” goes to Branch's own recoverable trash." % selected.name) if action == "trash" else ""
+	dialog.title = {"rename":"Rename", "mkdir":"New folder in "+current_path().get_file(), "trash":"Move to Cartografiler trash?"}[action]
+	dialog.dialog_text = ("“%s” goes to Cartografiler's own recoverable trash." % selected.name) if action == "trash" else ""
 	dialog_field.visible = action != "trash"
 	dialog_field.text = selected.name if action == "rename" else ""
 	dialog.popup_centered()
@@ -1632,7 +1632,7 @@ func confirm_action():
 	match pending_action:
 		"rename": notify("Renamed. The survey redraws the map there.", true)
 		"trash":
-			notify("Moved to Branch trash.", true)
+			notify("Moved to Cartografiler trash.", true)
 			deselect()
 		"mkdir": notify("Folder created. New folders can't be undone; trash it instead.")
 

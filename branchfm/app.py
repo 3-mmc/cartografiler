@@ -19,7 +19,7 @@ from .preview import Preview, preview
 
 WIDTH = 29
 GAP = 7
-HELP = '''Branch — spatial file browser
+HELP = '''Cartografiler — spatial file browser
 
 Native atlas      m (open the graphical 3D companion)
 Move              ↑ ↓ or k j
@@ -51,7 +51,7 @@ Multiple branches stay expanded until you collapse them.
 Preview reads run in a separate, time-limited process.
 Files are never executed to generate previews.
 
-Trash is private to Branch, not the Windows Recycle Bin.
+Trash is private to Cartografiler, not the Windows Recycle Bin.
 Recovery paths: ~/.local/share/branch/trash/recovery.tsv
 Copy and new-folder actions are not in the undo stack.
 Name collisions are refused, not overwritten.
@@ -274,12 +274,12 @@ class App:
         self.s.erase()
         h,w = self.s.getmaxyx()
         if h<12 or w<48:
-            self.put(0,0,'Branch needs at least 48 columns × 12 rows.')
+            self.put(0,0,'Cartografiler needs at least 48 columns × 12 rows.')
             self.put(2,0,'Resize your terminal, or press q to quit.')
             self.s.refresh()
             return
-        self.put(0,1,'Branch',self.color(1)|curses.A_BOLD)
-        self.put(0,10, str(self.active.path),curses.A_BOLD,w-12)
+        self.put(0,1,'Cartografiler',self.color(1)|curses.A_BOLD)
+        self.put(0,15, str(self.active.path),curses.A_BOLD,w-17)
         sub = f'{len(self.active.entries)} items'
         if self.active.query:
             sub += f'  / {self.active.query}'
@@ -428,9 +428,9 @@ class App:
         elif self.help:
             return True
         elif key=='m':
-            launcher = Path(__file__).resolve().parent.parent/'atlas'
+            launcher = Path(__file__).resolve().parent.parent/'cartografiler'
             subprocess.Popen([str(launcher),str(self.active.path)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
-            self.message = 'Requested native Atlas for this directory.'
+            self.message = 'Requested Cartografiler for this directory.'
         elif key in ('j',curses.KEY_DOWN,'k',curses.KEY_UP):
             self.active.index = max(0,min(len(self.active.entries)-1,self.active.index+(1 if key in ('j',curses.KEY_DOWN) else -1)))
         elif key in ('l',curses.KEY_RIGHT,'\n','\r',curses.KEY_ENTER):
@@ -529,11 +529,11 @@ class App:
                 self.message = 'Renamed.' if key=='r' else 'Folder created.'
         elif key=='d' and self.active.selected:
             source = self.active.selected
-            answer = self.prompt('Move '+clean(source.name)+' to Branch trash? Type yes: ')
+            answer = self.prompt('Move '+clean(source.name)+' to Cartografiler trash? Type yes: ')
             if answer=='yes':
                 self.ops.remove(source)
                 self.refresh()
-                self.message = 'Moved to Branch trash. Press u to restore.'
+                self.message = 'Moved to Cartografiler trash. Press u to restore.'
         elif key=='u':
             self.ops.undo()
             self.refresh()
@@ -570,7 +570,7 @@ class App:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Branch — a spatial terminal file manager. Press ? for controls.')
+    parser = argparse.ArgumentParser(description='Cartografiler — a spatial terminal file manager. Press ? for controls.')
     parser.add_argument('path',nargs='?',default='.',help='Starting folder (Linux or Windows drive path)')
     parser.add_argument('--preview',metavar='FILE',help='Print a read-only preview without opening the TUI')
     args = parser.parse_args()
@@ -585,7 +585,7 @@ def main():
     if not path.is_dir():
         parser.error('Starting path must be an accessible directory.')
     if not sys.stdin.isatty():
-        parser.error('Run Branch in an interactive terminal, or use --preview FILE.')
+        parser.error('Run Cartografiler in an interactive terminal, or use --preview FILE.')
     try:
         curses.wrapper(lambda s: App(s,path).run())
     except KeyboardInterrupt:
