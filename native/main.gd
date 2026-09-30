@@ -30,6 +30,9 @@ const SINK_PER_LEVEL = 1.2      # clearance under a coarse fallback, in render u
                                 # It must exceed the coarse-vs-fine height error or the
                                 # fallback punches through the finer tile and z-fights.
 const MAX_INFLIGHT = 6
+const TILE_CACHE_SECONDS = 30.0
+const MAX_CACHED_TILES = 128
+const LOD_HYSTERESIS = 0.65
 const DETAIL_REPEATS = 5.0      # detail texture repeats across the view (per octave)
 const KIND_NAMES = {"pdf":"PDF", "images":"Image", "audio":"Audio", "video":"Video", "tables":"Table", "code":"Source",
 	"archives":"Archive", "binaries":"Executable", "disks":"Disk image", "databases":"Database", "documents":"Document", "other":"File"}
@@ -57,6 +60,11 @@ var tiles = {}                  # "l:x:y" -> {node, mat, level, x, y, base, heig
 var wanted = {}
 var queued = []
 var inflight = 0
+var tile_requests = {}          # includes responses waiting for installation
+var tile_results = []           # upload at most one tile per frame
+var dirty_tiles = {}            # coalesced survey invalidations
+var status_busy = false
+var requested_level = 0
 # One outstanding pick and one outstanding label sweep at a time. Both walk the world in this
 # process rather than in a tile worker, so on cold ground they take longer than the timer that
 # asks for them; without this they queue up faster than they drain and starve each other out.
@@ -555,12 +563,14 @@ func tile_key(l: int, x: int, y: int) -> String:
 	return "%d:%d:%d" % [l, x, y]
 
 func update_tiles():
-	level = clampi(int(round(log(TILES_ACROSS/view)/log(2.0))), 0, 50)
-	var S = pow(0.5, level)
+	var lod = log(TILES_ACROSS/view)/log(2.0)
+	if absf(lod-requested_level) > LOD_HYSTERESIS:
+		requested_level = clampi(int(round(lod)), 0, 50)
+	var S = pow(0.5, requested_level)
 	# The ground the view actually sees (a trapezoid in perspective), with a margin.
 	var b = view_bbox()
 	var margin = view*0.12
-	var count = 1 << mini(level, 62)
+	var count = 1 << mini(requested_level, 62)
 	var x0 = clampi(int(floor((b[0]-margin)/S)), 0, count-1)
 	var x1 = clampi(int(floor((b[2]+margin)/S)), 0, count-1)
 	var y0 = clampi(int(floor((b[1]-margin)/S)), 0, count-1)
@@ -571,16 +581,27 @@ func update_tiles():
 	var order = []
 	for ty in range(y0, y1+1):
 		for tx in range(x0, x1+1):
-			var key = tile_key(level, tx, ty)
+			var key = tile_key(requested_level, tx, ty)
 			wanted[key] = true
-			if not tiles.has(key):
+			if not tile_requests.has(key) and (not tiles.has(key) or dirty_tiles.has(key)):
 				var d = Vector2((tx+0.5)*S-cam_x, (ty+0.5)*S-cam_y).length()
-				order.append([d, level, tx, ty])
+				order.append([d, requested_level, tx, ty])
 	order.sort_custom(func(a, b): return a[0] < b[0])
 	queued = order
+	# Swap LODs as a complete set, in either direction. Keep the displayed ground
+	# while replacements load, rather than exposing ocean between arrivals.
+	var ready = not wanted.is_empty()
+	for key in wanted:
+		if not tiles.has(key) or tiles[key].get("loading", false): ready = false
+	if ready: level = requested_level
 	# Keep a coarse ancestor for anything still loading; drop the rest (cache recent ones).
 	var keep = {}
+	if level != requested_level:
+		for key in tiles:
+			var t = tiles[key]
+			if not t.get("loading", false) and t.node.visible: keep[key] = true
 	for key in wanted:
+		if level != requested_level: continue
 		if tiles.has(key) and not tiles[key].get("loading", false):
 			keep[key] = true
 			continue
@@ -603,22 +624,32 @@ func update_tiles():
 		# Models only from tiles at the current level: a coarse fallback's larger trees would
 		# double up with the finer tile's.
 		for mmi in t.get("models", []): mmi.visible = t.node.visible and models_on and t.level == level
-		if t.node.visible:
-			t.age = 0
-		else:
-			t.age = t.get("age", 0)+1
-			if t.age > 300:
-				free_tile(t)
-				tiles.erase(key)
+		if t.node.visible or wanted.has(key) or tile_requests.has(key):
+			t.last_used = clock
+	# A time-based, bounded cache survives a quick pan away and back at any FPS.
+	var idle = []
+	for key in tiles:
+		var t = tiles[key]
+		if t.get("loading", false) or t.node.visible or wanted.has(key) or tile_requests.has(key): continue
+		idle.append([t.get("last_used", clock), key])
+	idle.sort_custom(func(a, b): return a[0] < b[0])
+	for item in idle:
+		if clock-item[0] > TILE_CACHE_SECONDS or tiles.size() > MAX_CACHED_TILES:
+			free_tile(tiles[item[1]])
+			tiles.erase(item[1])
+			dirty_tiles.erase(item[1])
 	pump_requests()
 
 func pump_requests():
 	while inflight < MAX_INFLIGHT and not queued.is_empty():
 		var item = queued.pop_front()
 		var key = tile_key(item[1], item[2], item[3])
-		if tiles.has(key) or not wanted.has(key):
+		if tile_requests.has(key) or not wanted.has(key) or (tiles.has(key) and not dirty_tiles.has(key)):
 			continue
-		tiles[key] = {"loading":true, "level":item[1], "x":item[2], "y":item[3]}
+		if not tiles.has(key):
+			tiles[key] = {"loading":true, "level":item[1], "x":item[2], "y":item[3]}
+		dirty_tiles.erase(key)
+		tile_requests[key] = true
 		inflight += 1
 		fetch_tile(item[1], item[2], item[3])
 
@@ -627,15 +658,23 @@ func fetch_tile(l: int, x: int, y: int):
 	var request = HTTPRequest.new()
 	request.timeout = 90
 	add_child(request)
-	request.request(api_url+"/tile?l=%d&x=%d&y=%d" % [l, x, y], PackedStringArray(["Authorization: Bearer "+token]))
+	var error = request.request(api_url+"/tile?l=%d&x=%d&y=%d" % [l, x, y], PackedStringArray(["Authorization: Bearer "+token]))
+	if error != OK:
+		request.queue_free()
+		finish_tile_request(key, [])
+		return
 	var response = await request.request_completed
 	request.queue_free()
+	tile_results.append([key, response])
+
+func finish_tile_request(key: String, response: Array):
 	inflight -= 1
-	if response[0] == HTTPRequest.RESULT_SUCCESS and response[1] == 200:
+	tile_requests.erase(key)
+	if response.size() == 4 and response[0] == HTTPRequest.RESULT_SUCCESS and response[1] == 200:
 		install_tile(key, response[3])
-	elif tiles.has(key) and tiles[key].get("loading", false):
-		tiles.erase(key)
-	pump_requests()
+	elif tiles.has(key):
+		if tiles[key].get("loading", false): tiles.erase(key)
+		else: dirty_tiles[key] = true
 
 func install_tile(key: String, body: PackedByteArray):
 	if body.size() < 36 or body.slice(0, 4).get_string_from_ascii() != "BTL3":
@@ -673,21 +712,27 @@ func install_tile(key: String, body: PackedByteArray):
 	mat.set_shader_parameter("texel_world", S/float(n-1))
 	mat.set_shader_parameter("exaggeration", EXAG)
 	var node = MeshInstance3D.new()
+	node.visible = false   # positioned and made visible together in the next frame
 	node.mesh = tile_mesh
 	node.material_override = mat
 	node.extra_cull_margin = 1000.0   # displaced in the shader; keep the CPU from culling it
 	world.add_child(node)
 	var old = tiles.get(key, {})
 	if old.has("node") and is_instance_valid(old.node):
+		node.visible = old.node.visible
 		free_tile(old)
-	tiles[key] = {"node":node, "mat":mat, "level":l, "x":x, "y":y, "base":base, "heights":heights, "S":S, "age":0,
+	tiles[key] = {"node":node, "mat":mat, "level":l, "x":x, "y":y, "base":base, "heights":heights, "S":S, "last_used":clock,
 		"models":models, "born":clock}
 	places_dirty = true
 
 func free_tile(t: Dictionary):
-	if t.has("node") and is_instance_valid(t.node): t.node.queue_free()
+	if t.has("node") and is_instance_valid(t.node):
+		t.node.visible = false
+		t.node.queue_free()
 	for mmi in t.get("models", []):
-		if is_instance_valid(mmi): mmi.queue_free()
+		if is_instance_valid(mmi):
+			mmi.visible = false
+			mmi.queue_free()
 
 func build_models(body: PackedByteArray, offset: int) -> Array:
 	# Trees, houses and boulders: one MultiMesh per kind, positions relative to the tile.
@@ -806,7 +851,7 @@ func height_at(x: float, y: float) -> float:
 	var best = null
 	for key in tiles:
 		var t = tiles[key]
-		if t.get("loading", false): continue
+		if t.get("loading", false) or not t.node.visible: continue
 		var S = t.S
 		if x < t.x*S or x > (t.x+1)*S or y < t.y*S or y > (t.y+1)*S: continue
 		if best == null or t.level > best.level: best = t
@@ -875,6 +920,9 @@ func fly_to_place(p: Dictionary):
 
 func _process(delta):
 	clock += delta
+	if not tile_results.is_empty():
+		var result = tile_results.pop_front()
+		finish_tile_request(result[0], result[1])
 	idle_time += delta
 	if not flying:
 		var k = 1.0-exp(-delta*10.0)
@@ -1081,25 +1129,27 @@ static func big_number(value) -> String:
 	return str(int(n))
 
 func poll_status():
+	if status_busy: return
+	status_busy = true
 	var data = await api("/status?since=%d" % serial)
+	status_busy = false
 	if data.has("error"): return
 	survey = data
 	serial = int(data.get("serial", serial))
-	for box in data.get("invalid", []):
-		for key in tiles.keys():
-			var t = tiles[key]
-			if t.get("loading", false): continue
-			var S = t.S
-			if (t.x+1)*S < box[0] or (t.y+1)*S < box[1] or t.x*S > box[2] or t.y*S > box[3]: continue
-			if wanted.has(key):
-				# Redraw in place: the old tile stays until the new one arrives.
-				inflight += 1
-				fetch_tile(t.level, t.x, t.y)
-			else:
-				free_tile(t)
-				tiles.erase(key)
-	if not data.get("invalid", []).is_empty(): places_dirty = true
+	invalidate_tiles(data.get("invalid", []))
 	update_info()
+
+func invalidate_tiles(boxes: Array):
+	# Keep old ground until refreshed. Overlapping boxes and repeated status polls
+	# coalesce; refreshes use the same bounded queue as newly visible tiles.
+	for key in tiles:
+		var t = tiles[key]
+		var S = pow(0.5, t.level)
+		for box in boxes:
+			if (t.x+1)*S < box[0] or (t.y+1)*S < box[1] or t.x*S > box[2] or t.y*S > box[3]: continue
+			dirty_tiles[key] = true
+			break
+	if not boxes.is_empty(): places_dirty = true
 
 # ---------------------------------------------------------------- input
 

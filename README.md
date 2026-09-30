@@ -109,6 +109,7 @@ place's interior, and cached on disk.
 
 ```bash
 python3 -m unittest discover -s tests -v
+./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --script res://tests/streaming.gd
 ./tools/Godot_v4.7.2-stable_linux.x86_64 --headless --path native --editor --import --quit
 ./atlas / --smoke --capture /tmp/world.png
 ./atlas / --smoke --capture /tmp/home.png --enter /home/praetor

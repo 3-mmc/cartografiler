@@ -33,11 +33,13 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 
 from . import fastnoise as _fastnoise
+from .mounts import disk_mounts
 
 OUT, HOME, SEA = 0, 1, 2
 FIRST_CHILD = 3
 MAX_CHILDREN = 3000
-LAYOUT_VERSION = 16          # bump when the layout changes shape, so cached territories are redone
+
+LAYOUT_VERSION = 17          # bump when the layout changes shape, so cached territories are redone
 # A store is a cache, and must never keep a request waiting longer than the client will. Six
 # worker processes and this one all write it, and SQLite's busy wait was 30 s against a client
 # that gives up at 20: picking then timed out rather than simply redrawing.
@@ -705,8 +707,17 @@ class World:
         t = self.root()
         if path == '/':
             return t
-        parts = [p for p in path.split('/') if p]
         current = ''
+        # Enter promoted disks directly, before walking their ordinary ancestors.
+        disk = next((c for c in t.children if c['path'] != '/' and
+                     (path == c['path'] or path.startswith(c['path']+'/')) and
+                     self.continent_of(c['path']) != '/'), None)
+        if disk is not None:
+            t = self.child(t, disk)
+            if t is None:
+                return None
+            current = disk['path']
+        parts = [p for p in path[len(current):].split('/') if p]
         for part in parts:
             current += '/'+part
             match = next((c for c in t.children if c['path'] == current), None)
@@ -731,6 +742,8 @@ class World:
         rows = [dict(r) for r in self.index.children(node['id'])]
         if parent is None:
             rows = self._promote_mounts(rows)
+        else:
+            rows = [r for r in rows if r['path'] not in disk_mounts()]
         sig = self._signature(node, rows, parent, entry)
         with self.lock:
             if t is not None and t.sig == sig:
@@ -756,21 +769,22 @@ class World:
         return fresh
 
     def _promote_mounts(self, rows):
-        # Continents are disks: drives mounted under /mnt join the world root directly,
-        # and /mnt itself (a list of mount points) disappears from the map.
-        out = []
-        for r in rows:
-            if r['is_dir'] and not r['link'] and r['path'] == '/mnt':
-                for c in self.index.children(r['id']):
-                    c = dict(c)
-                    if c['is_dir'] and not c['link'] and os.path.ismount(c['path']) and c['path'] not in ('/mnt/wsl', '/mnt/wslg'):
-                        out.append(c)
-                continue
-            out.append(r)
+        # Promote indexed disks even when their mount lives below an excluded virtual
+        # directory such as /run. Keep their real filesystem paths for operations.
+        out = [r for r in rows if r['path'] != '/mnt']
+        known = {r['path'] for r in out}
+        for path in disk_mounts():
+            node = self.index.node(path)
+            if node is not None and node['is_dir'] and not node['link'] and path not in known:
+                out.append(dict(node))
+                known.add(path)
         return out
 
     @staticmethod
     def continent_of(path: str) -> str:
+        for root in disk_mounts():
+            if path == root or path.startswith(root+'/'):
+                return root
         parts = path.split('/')
         if len(parts) >= 3 and parts[1] == 'mnt' and len(parts[2]) == 1:
             return '/mnt/'+parts[2]
@@ -821,6 +835,8 @@ class World:
             rows = [dict(r) for r in self.index.children(t.node_id)]
             if t.path == '/':
                 rows = self._promote_mounts(rows)
+            else:
+                rows = [r for r in rows if r['path'] not in disk_mounts()]
             by_id = {r['id']: r for r in rows}
             stale_shape = False
             for c in t.children:

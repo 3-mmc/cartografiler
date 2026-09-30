@@ -24,6 +24,7 @@ import time
 from pathlib import Path, PurePosixPath
 
 from .atlas import kind_of
+from .mounts import disk_mounts
 from .cloud import to_linux, to_windows
 
 # Listed as places on the map but never crawled: virtual, recursive or not ours to walk.
@@ -386,7 +387,14 @@ class Surveyor(threading.Thread):
             self.wake.notify()
         self.windows.close()
 
+    def discover_mounts(self):
+        # /run remains excluded: only actual mounted data disks bypass that rule.
+        for path in disk_mounts():
+            node = self.index.node(path)
+            self.request(path, 1, recursive=node is None or not node['scanned'] or time.time()-node['scanned'] > 12*3600)
+
     def run(self):
+        self.discover_mounts()
         while not self.stopping:
             with self.wake:
                 while not self.queue and not self.stopping:

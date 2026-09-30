@@ -50,21 +50,31 @@ vec2 hash2(vec2 p) {
 	return fract(sin(p) * 43758.5453) * 2.0 - 1.0;
 }
 
-float gnoise(vec2 p) {
+// Analytic gradient of the same cubic-interpolated gradient noise. Four corner
+// hashes replace four complete noise evaluations per slope (16 corner hashes).
+vec2 gnoise_slope(vec2 p) {
 	vec2 i = floor(p);
 	vec2 f = fract(p);
 	vec2 u = f * f * (3.0 - 2.0 * f);
-	return mix(mix(dot(hash2(i), f), dot(hash2(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
-	           mix(dot(hash2(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), dot(hash2(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
+	vec2 du = 6.0 * f * (1.0 - f);
+	vec2 g00 = hash2(i);
+	vec2 g10 = hash2(i + vec2(1.0, 0.0));
+	vec2 g01 = hash2(i + vec2(0.0, 1.0));
+	vec2 g11 = hash2(i + vec2(1.0, 1.0));
+	float a = dot(g00, f);
+	float b = dot(g10, f - vec2(1.0, 0.0));
+	float c = dot(g01, f - vec2(0.0, 1.0));
+	float d = dot(g11, f - vec2(1.0, 1.0));
+	return mix(mix(g00, g10, u.x), mix(g01, g11, u.x), u.y)
+		+ du * vec2(mix(b - a, d - c, u.y), mix(c - a, d - b, u.x));
 }
 
 vec2 micro_slope(vec2 p) {
-	// Three octaves of slope (d height / d uv), by central differences.
+	// Three octaves of analytic slope, with the existing octave weights.
 	vec2 g = vec2(0.0);
 	float amp = 1.0;
 	for (int o = 0; o < 3; o++) {
-		float e = 0.02;
-		g += amp * vec2(gnoise(p + vec2(e, 0.0)) - gnoise(p - vec2(e, 0.0)), gnoise(p + vec2(0.0, e)) - gnoise(p - vec2(0.0, e))) / (2.0 * e);
+		g += amp * gnoise_slope(p);
 		p = p * 2.07 + vec2(17.3, 9.1);
 		amp *= 0.5;
 	}

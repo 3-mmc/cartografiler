@@ -441,6 +441,9 @@ class Atlas:
             self.surveyor.request(target, 0, recursive=node is None or not node['scanned'])
         if path == '/':
             return {'path': '/', 'name': '/', 'x': 0.5, 'y': 0.5, 'side': 0.8, 'bbox': (0.1, 0.1, 0.9, 0.9)}
+        disk = next((c for c in self.world.root().children if c['path'] == path), None)
+        if disk is not None:
+            return self._entry(disk)
         parent = self.world.territory_for(os.path.dirname(path))
         if parent is None:
             return {'error': 'Not surveyed yet. The survey has been asked to go there first.'}
