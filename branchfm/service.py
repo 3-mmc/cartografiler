@@ -407,7 +407,10 @@ def launch():
     pack = base/'runtime/CartografilerMap.pck'
     if pack.is_file():
         env['CARTOGRAFILER_TEXTURES'] = str(base/'native/textures')
-    cmd = [str(runtime)] + (['--main-pack',str(pack)] if pack.is_file() else ['--path',str(base/'native')])
+    # Release templates disallow --main-pack; load their same-name sibling PCK automatically.
+    # An explicitly selected development editor can still consume the pack by override.
+    packed_args = [] if runtime.parent == pack.parent else ['--main-pack',str(pack)]
+    cmd = [str(runtime)] + (packed_args if pack.is_file() else ['--path',str(base/'native')])
     if args.headless:
         cmd.append('--headless')
     cmd += ['--']

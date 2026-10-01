@@ -21,7 +21,7 @@ URL = f'https://github.com/godotengine/godot-builds/releases/download/{VERSION}'
 
 
 def run(*args):
-    subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT)
+    subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT, timeout=600)
 
 
 def fetch(name: str, folder: Path, sums: dict[str, str]) -> Path:
@@ -84,14 +84,12 @@ def main():
         distribution = importlib.metadata.distribution(package)
         destination = licenses/package
         destination.mkdir(exist_ok=True)
-        copied = []
         for number, file in enumerate(distribution.files or []):
             if any(part.lower().startswith(('license', 'copying', 'copyright', 'notice')) for part in file.parts):
                 source = Path(distribution.locate_file(file))
                 if source.is_file():
                     target = destination/f'{number}-{source.name}'
                     shutil.copy2(source, target)
-                    copied.append(str(file))
         (destination/'METADATA.txt').write_text(distribution.read_text('METADATA') or '')
     python_license = Path(sysconfig.get_path('stdlib'))/'LICENSE.txt'
     if not python_license.is_file():
