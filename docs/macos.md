@@ -94,6 +94,10 @@ Caches and recoverable trash still use `~/.local/share/branch/` (or `XDG_DATA_HO
 Preview workers retain timeouts and format-specific size limits. The Linux address-space
 memory ceiling is not applied on macOS; an equivalent limit remains future work.
 
+Pinch open to zoom in and pinch closed to zoom out. Two-finger vertical scrolling
+also zooms at the cursor; click and drag to pan. The +/− keys and on-screen buttons
+remain available.
+
 ## Validate on the Mac
 
 From the activated virtual environment:
@@ -102,6 +106,7 @@ From the activated virtual environment:
 python3 -m unittest discover -s tests -v
 ./tools/Godot.app/Contents/MacOS/Godot --headless --path native --editor --import --quit
 ./tools/Godot.app/Contents/MacOS/Godot --headless --path native --script res://tests/streaming.gd
+./tools/Godot.app/Contents/MacOS/Godot --headless --path native --script res://tests/gestures.gd
 ./cartografiler / --smoke --capture /tmp/cartografiler-world.png
 ./cartografiler / --smoke --capture /tmp/cartografiler-home.png --enter "$HOME"
 ```

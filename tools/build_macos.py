@@ -101,6 +101,7 @@ def main():
     if not args.skip_tests:
         run(sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v')
         run(editor, '--headless', '--path', ROOT/'native', '--script', 'res://tests/streaming.gd')
+        run(editor, '--headless', '--path', ROOT/'native', '--script', 'res://tests/gestures.gd')
     run(editor, '--headless', '--path', ROOT/'native', '--export-pack', 'macOS', assets/'CartografilerMap.pck')
     run(sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', ROOT/'packaging/macos/Cartografiler.spec')
     app = ROOT/'dist/Cartografiler.app'

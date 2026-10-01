@@ -82,7 +82,7 @@ retain worker timeouts but currently have no equivalent memory ceiling.
 
 | Control | Action |
 |---|---|
-| Drag · wheel · right-drag | Pan · zoom at the cursor · turn and tilt |
+| Drag · wheel / pinch / two-finger scroll · right-drag | Pan · zoom at the cursor · turn and tilt |
 | Click · double-click · Enter | Select · fly there |
 | Backspace · Home | Up to the enclosing place · the whole world |
 | WASD / arrows · Q/E · PgUp/PgDn | Pan · turn · tilt |

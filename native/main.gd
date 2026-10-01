@@ -1156,7 +1156,7 @@ func invalidate_tiles(boxes: Array):
 # ---------------------------------------------------------------- input
 
 func _input(event):
-	if event is InputEventMouseMotion or event is InputEventKey:
+	if event is InputEventMouseMotion or event is InputEventKey or event is InputEventGesture:
 		idle_time = 0.0
 	if event is InputEventKey and event.pressed and event.ctrl_pressed and event.keycode == KEY_P:
 		command_palette()
@@ -1189,6 +1189,15 @@ func _input(event):
 		update_hover(event.position)
 
 func _unhandled_input(event):
+	# macOS trackpads send gestures rather than mouse-wheel buttons.
+	if event is InputEventMagnifyGesture:
+		if is_finite(event.factor) and event.factor > 0.0:
+			zoom_by(1.0/event.factor, event.position)
+		return
+	if event is InputEventPanGesture:
+		if is_finite(event.delta.y) and event.delta.y != 0.0:
+			zoom_by(pow(1.25, clampf(event.delta.y, -8.0, 8.0)), event.position)
+		return
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if path_field.visible: hide_path_field()
@@ -1492,7 +1501,7 @@ Green to red cells: files changed today. R toggles the radar.
 Temperate: Linux. Tropical: Windows drives. Wetland: network mounts. Desert: virtual filesystems. Alpine: anywhere you cannot write.
 
 [color=#d9c68f][b]Moving[/b][/color]
-Drag to pan · wheel to zoom at the cursor · right-drag to turn and tilt · double-click to go to a place · Backspace up · Home: the whole world
+Drag to pan · wheel / pinch / two-finger scroll to zoom · right-drag to turn and tilt · double-click to go to a place · Backspace up · Home: the whole world
 WASD / arrows pan · Q/E turn · PgUp/PgDn tilt · V perspective or flat map · M 3D landmarks · G gazetteer · Ctrl+P Bash · Ctrl+L path · R radar · L labels · F map only
 Space peek · F2 rename · Delete trash · Ctrl+C / X / V copy, cut, paste into the region you are over · Ctrl+Z undo"""
 
