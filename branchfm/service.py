@@ -155,7 +155,7 @@ def bash_destinations(command: str, cwd: Path):
     # trailer is constant Bash syntax; paths are never interpolated into the script.
     trailer = "\nbranch_result=$?\nprintf '"+marker.replace('\0','\\0')+"'\nprintf '%s\\0%s' \"$PWD\" \"$branch_result\"\n"
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        process = subprocess.Popen(['bash','--noprofile','--norc','-c',command+trailer],cwd=cwd,stdout=out,stderr=err,start_new_session=True)
+        process = subprocess.Popen(['bash','--noprofile','--norc','-c',command+trailer],cwd=cwd,env=dict(os.environ, PWD=str(cwd)),stdout=out,stderr=err,start_new_session=True)
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:

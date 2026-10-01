@@ -86,6 +86,15 @@ class CoreTests(unittest.TestCase):
         result = bash_destinations("find . -name '*.pdf' -print0",self.root)
         self.assertEqual(Path(result['results'][0]['path']),folder/'a file.pdf')
 
+    def test_bash_keeps_the_logical_working_directory(self):
+        physical = self.root/'physical'
+        physical.mkdir()
+        (physical/'notes.txt').write_text('fixture')
+        logical = self.root/'logical'
+        logical.symlink_to(physical, target_is_directory=True)
+        result = bash_destinations("printf '%s\\n' notes.txt", logical)
+        self.assertEqual(result['results'][0]['path'], str(logical/'notes.txt'))
+
     def test_bash_failure_and_nonpaths(self):
         with self.assertRaises(ValueError): bash_destinations('false',self.root)
         self.assertEqual(bash_destinations('printf not-a-file',self.root)['results'],[])
