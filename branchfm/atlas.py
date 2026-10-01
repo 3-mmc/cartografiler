@@ -360,8 +360,8 @@ def seasonal_color(facts,default):
 def scan_metadata(paths,conn):
     """One bounded metadata task per directory, not a recursive disk scan."""
     try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS,(256*1024*1024,256*1024*1024))
+        from .platform import limit_worker_memory
+        limit_worker_memory(256*1024*1024)
         deadline = time.monotonic()+20
         for path in paths:
             if time.monotonic()>deadline:

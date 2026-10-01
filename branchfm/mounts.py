@@ -1,18 +1,17 @@
-"""Data disks mounted in the conventional Linux/WSL mount directories."""
+"""Data disks promoted to continents on Linux/WSL and macOS."""
 from functools import lru_cache
-from pathlib import Path
-import re
+from . import platform as host
+import sys
 import time
 
 
 def parse_disk_mounts(text: str) -> tuple[str, ...]:
+    return _linux_disks(host.parse_mount_table(text))
+
+
+def _linux_disks(table: list[tuple[str, str]]) -> tuple[str, ...]:
     roots = set()
-    for line in text.splitlines():
-        fields = line.split()
-        if len(fields) < 3:
-            continue
-        path = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[1])
-        kind = fields[2]
+    for path, kind in table:
         if not path.startswith(('/mnt/', '/media/', '/run/media/')):
             continue
         if path == '/mnt/wsl' or path.startswith('/mnt/wsl/') or path == '/mnt/wslg' or path.startswith('/mnt/wslg/'):
@@ -26,10 +25,13 @@ def parse_disk_mounts(text: str) -> tuple[str, ...]:
 
 @lru_cache(maxsize=1)
 def _disk_mounts(bucket: int) -> tuple[str, ...]:
-    try:
-        return parse_disk_mounts(Path('/proc/mounts').read_text())
-    except OSError:
-        return ()
+    if sys.platform == 'darwin':
+        roots = {path.rstrip('/') for path, kind in host.mount_table()
+                 if path.startswith('/Volumes/') and kind not in {'autofs', 'devfs'}}
+        return tuple(p for p in sorted(roots) if not any(p.startswith(q+'/') for q in roots if q != p))
+    if sys.platform.startswith('linux'):
+        return _linux_disks(host.mount_table())
+    return ()
 
 
 def disk_mounts() -> tuple[str, ...]:

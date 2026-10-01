@@ -4,3 +4,7 @@ native/.godot/
 tools/Godot*
 demo/
 *.egg-info/
+
+.venv/
+build/
+dist/

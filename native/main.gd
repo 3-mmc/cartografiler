@@ -781,7 +781,9 @@ func load_detail_textures():
 	# CC0 ground detail (native/textures, fetched by tools/fetch_textures.py), one layer per material.
 	var images: Array[Image] = []
 	for name in ["meadow", "forest", "field", "town", "wet", "snow", "rock", "sand"]:
-		var image = Image.load_from_file(ProjectSettings.globalize_path("res://textures/%s.png" % name))
+		var texture_root = OS.get_environment("CARTOGRAFILER_TEXTURES")
+		var texture_path = texture_root.path_join("%s.png" % name) if texture_root != "" else ProjectSettings.globalize_path("res://textures/%s.png" % name)
+		var image = Image.load_from_file(texture_path)
 		if image == null or image.is_empty():
 			push_warning("Missing detail texture %s; run tools/fetch_textures.py" % name)
 			return

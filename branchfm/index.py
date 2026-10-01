@@ -25,11 +25,12 @@ from pathlib import Path, PurePosixPath
 
 from .atlas import kind_of
 from .mounts import disk_mounts
+from .platform import survey_exclusions
 from .cloud import to_linux, to_windows
 
 # Listed as places on the map but never crawled: virtual, recursive or not ours to walk.
 NO_CRAWL = {'/proc', '/sys', '/dev', '/run', '/mnt/wsl', '/mnt/wslg', '/lost+found', '/snap',
-            '/var/lib/docker', '/usr/lib/wsl', '/boot/efi'}
+            '/var/lib/docker', '/usr/lib/wsl', '/boot/efi'} | survey_exclusions()
 REPARSE_POINT = 0x400
 KINDS = ('folders', 'pdf', 'images', 'audio', 'video', 'tables', 'code', 'archives', 'binaries',
          'disks', 'databases', 'documents', 'weights', 'other')

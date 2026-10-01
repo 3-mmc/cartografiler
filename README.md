@@ -9,7 +9,13 @@ The geography is continuous and irregular, with no visible board or regular grid
 Its visual direction draws on Civilization V map visuals: blended terrain, clustered
 settlements, rivers between territories, and a tilted perspective camera.
 
-## Run
+## macOS app
+
+The Apple Silicon standalone build targets macOS 14+. It bundles Python, dependencies,
+Godot's release runtime, and the requested iDisk icon. Build/download instructions are in
+**[docs/macos.md](docs/macos.md)**. The first build is not Apple-notarized.
+
+## Run from source
 
 From the repository on Linux (or WSL with WSLg), install Python 3.11+ dependencies and
 put the official Godot 4.7.2 stable Linux x86_64 binary in
@@ -53,6 +59,24 @@ entries expire with time-sensitive features and are invalidated by survey change
 The legacy `branch` data directory is retained so existing indexes and trash stay usable.
 
 The lightweight terminal companion is `./branch /path`. Press `?` there for controls.
+
+## Native platform support in progress
+
+Linux/WSL is the validated platform. Host-specific runtime selection, file opening,
+mount queries, and preview memory limits live in `branchfm/platform.py`.
+
+For macOS, place `Godot.app` under `tools/`, or set `CARTOGRAFILER_GODOT` to its
+`Contents/MacOS/Godot` executable. The Unix launchers resolve paths through Python;
+macOS uses `open` for file associations and discovers external disks under `/Volumes`.
+The survey excludes `/System/Volumes` to avoid crawling the duplicate APFS startup
+volume tree. The standalone build includes compiled noise and compressed persistent
+tile caches. See **[macOS setup and validation](docs/macos.md)** for build and testing details.
+
+Windows runtime selection and file-opening adapters are present. The full native
+Windows application is **not ready**: drive/UNC paths, world-root representation,
+volume discovery, junction handling, command-palette process control, and packaging
+still need porting. Linux retains preview address-space limits; macOS and Windows
+retain worker timeouts but currently have no equivalent memory ceiling.
 
 ## Moving around
 

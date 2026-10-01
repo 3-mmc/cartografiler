@@ -10,6 +10,17 @@
 - Survey from a terminal: `python3 -m branchfm.index /` (or a path).
 - Do not edit `/home/praetor/AGENTS.md` for this project: it is generated from the shared machine instructions.
 
+## Native platform priority
+
+- Prioritize native macOS (Apple Silicon) support before completing native Windows support.
+- Host services live in `branchfm/platform.py`; keep Linux/WSL behavior validated.
+- macOS setup and the real-Mac validation checklist are in `docs/macos.md`.
+- `Cartografiler.command` is a Finder-friendly development launcher using `.venv`.
+- Standalone macOS build: `python3 tools/build_macos.py` on ARM64 macOS, or `.github/workflows/macos-app.yml`. Frozen entry point calls `multiprocessing.freeze_support()` before importing the service.
+- Bundle targets macOS 14+, includes Numba/Zstandard and a release Godot runtime; interactive M1 GPU validation remains required.
+- Keep the requested iDisk icon source, attribution, and Design Science License in the app.
+- Automatic surveys skip `/System/Volumes` on macOS to avoid duplicate APFS startup views.
+
 ## Tools and architecture
 
 - Godot **4.7.2 stable**, official Linux x86_64 binary at `tools/Godot_v4.7.2-stable_linux.x86_64`. Compatibility renderer (GL).

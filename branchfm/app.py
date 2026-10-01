@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import curses
 import json
 import locale
@@ -16,6 +15,7 @@ from pathlib import Path
 
 from .model import Node, Operations, clean, layout
 from .preview import Preview, preview
+from . import platform as host
 
 WIDTH = 29
 GAP = 7
@@ -81,8 +81,7 @@ def path_input(value):
 
 def worker(path, conn):
     try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (384*1024*1024, 384*1024*1024))
+        host.limit_worker_memory(384*1024*1024)
         conn.send(preview(path))
     except BaseException:
         pass
@@ -393,16 +392,7 @@ class App:
 
     def open_external(self):
         p = self.active.selected or self.active.path
-        if str(p).startswith('/mnt/') and len(p.parts)>3 and len(p.parts[2])==1 and shutil.which('powershell.exe'):
-            win = p.parts[2].upper()+':\\'+'\\'.join(p.parts[3:])
-            encoded = base64.b64encode(win.encode()).decode()
-            cmd = ['powershell.exe','-NoProfile','-NonInteractive','-Command',
-                   "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"')); Invoke-Item -LiteralPath $p"]
-        else:
-            if not shutil.which('xdg-open'):
-                raise ValueError('No default opener found (xdg-open).')
-            cmd = ['xdg-open',str(p)]
-        subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        host.open_external(p)
         self.message = 'Requested external open: '+p.name
 
     def handle(self,key):

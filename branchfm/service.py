@@ -5,6 +5,7 @@ import json
 import multiprocessing as mp
 import os
 import secrets
+import sys
 import shutil
 import subprocess
 import threading
@@ -16,14 +17,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from .atlas import biome, directory_facts, git_facts, metadata
 from . import cloud, visits
+from . import platform as host
 from .model import Operations, size
 from .preview import preview
 
 
 def _extract(path, kind, conn):
     try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS,(384*1024*1024,384*1024*1024))
+        host.limit_worker_memory(384*1024*1024)
         result = asdict(preview(path)) if kind=='preview' else metadata(path)
         if kind=='preview' and result.get('pixels'):
             import base64
@@ -93,7 +94,7 @@ class Service(ThreadingHTTPServer):
 
 
 FS_CLIMATE = {'9p':'windows','drvfs':'windows','v9fs':'windows','cifs':'network','smb3':'network','nfs':'network',
-              'nfs4':'network','fuse.sshfs':'network','fuse.rclone':'network','tmpfs':'ephemeral','ramfs':'ephemeral',
+              'nfs4':'network','smbfs':'network','afpfs':'network','webdav':'network','fuse.sshfs':'network','fuse.rclone':'network','tmpfs':'ephemeral','ramfs':'ephemeral',
               'proc':'ephemeral','sysfs':'ephemeral','devtmpfs':'ephemeral','cgroup2':'ephemeral','debugfs':'ephemeral'}
 
 
@@ -103,15 +104,7 @@ _mounts = (0.0, [])
 def mount_table():
     global _mounts
     if time.monotonic()-_mounts[0] > 30:
-        table = []
-        try:
-            with open('/proc/mounts',encoding='utf-8',errors='replace') as mounts:
-                for line in mounts:
-                    parts = line.split()
-                    if len(parts)>=3:
-                        table.append((parts[1].replace('\\040',' '),parts[2]))
-        except OSError:
-            pass
+        table = host.mount_table()
         _mounts = (time.monotonic(),table)
     return _mounts[1]
 
@@ -380,16 +373,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def open_external(path):
-        import base64
-        import shutil
-        if str(path).startswith('/mnt/') and len(path.parts)>3 and len(path.parts[2])==1 and shutil.which('powershell.exe'):
-            win = path.parts[2].upper()+':\\'+'\\'.join(path.parts[3:])
-            encoded = base64.b64encode(win.encode()).decode()
-            cmd = ['powershell.exe','-NoProfile','-NonInteractive','-Command',
-                   "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"')); Invoke-Item -LiteralPath $p"]
-        else:
-            cmd = ['xdg-open',str(path)]
-        subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        host.open_external(path)
 
 
 def launch():
@@ -407,21 +391,23 @@ def launch():
     path = Path(args.path).expanduser().absolute()
     if args.path=='demo':
         from .demo import create_demo
-        path = create_demo(Path(__file__).resolve().parent.parent/'demo')
+        path = create_demo(Path(os.environ.get('XDG_DATA_HOME',Path.home()/'.local/share'))/'branch/demo' if getattr(sys, 'frozen', False) else host.asset_root()/'demo')
     if not path.is_dir():
         parser.error('Starting path must be a directory.')
-    base = Path(__file__).resolve().parent.parent
-    runtimes = sorted((base/'tools').glob('Godot*_linux.x86_64'))
-    if not runtimes:
-        parser.error('Godot runtime missing from tools/. See README.md.')
+    base = host.asset_root()
+    try:
+        runtime = host.godot_runtime(base)
+    except ValueError as error:
+        parser.error(str(error))
     service = Service(path, atlas=True)
     thread = threading.Thread(target=service.serve_forever,daemon=True)
     thread.start()
-    env = dict(os.environ,BRANCH_API=f'http://127.0.0.1:{service.server_port}',BRANCH_TOKEN=service.token,BRANCH_ROOT=str(path))
-    if 'GALLIUM_DRIVER' not in env and Path('/usr/lib/wsl/lib/libd3d12.so').exists():
-        # WSLg's default OpenGL is llvmpipe (CPU). Mesa's D3D12 driver reaches the real GPU.
-        env['GALLIUM_DRIVER'] = 'd3d12'
-    cmd = [str(runtimes[-1]),'--path',str(base/'native')]
+    env = host.renderer_environment()
+    env.update(BRANCH_API=f'http://127.0.0.1:{service.server_port}',BRANCH_TOKEN=service.token,BRANCH_ROOT=str(path))
+    pack = base/'runtime/CartografilerMap.pck'
+    if pack.is_file():
+        env['CARTOGRAFILER_TEXTURES'] = str(base/'native/textures')
+    cmd = [str(runtime)] + (['--main-pack',str(pack)] if pack.is_file() else ['--path',str(base/'native')])
     if args.headless:
         cmd.append('--headless')
     cmd += ['--']
@@ -438,7 +424,8 @@ def launch():
     if args.time:
         cmd.append('--time')
     import signal
-    godot = subprocess.Popen(cmd,env=env)
+    streams = {'stdout': sys.stdout, 'stderr': sys.stderr} if getattr(sys, 'frozen', False) else {}
+    godot = subprocess.Popen(cmd,env=env,**streams)
     def stop(*_):
         # Never leave an orphaned window behind: WSLg keeps dead windows on screen.
         if godot.poll() is None:

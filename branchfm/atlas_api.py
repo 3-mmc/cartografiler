@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from .index import Index, Surveyor
+from .platform import tile_worker_count
 from .tiles import N, Synth, encode
 from .world import CACHE_BUSY_TIMEOUT, HOME, LAYOUT_VERSION, SEA, World, climate, label_at
 
@@ -215,7 +216,7 @@ class Atlas:
         # Tiles render in worker processes, so picking, labels and status stay responsive.
         import concurrent.futures
         import multiprocessing
-        count = workers if workers is not None else max(2, min(6, (os.cpu_count() or 4)-2))
+        count = workers if workers is not None else tile_worker_count()
         self.pool = concurrent.futures.ProcessPoolExecutor(count, mp_context=multiprocessing.get_context('spawn'),
                                                            initializer=_worker_init, initargs=(str(self.index.location),)) if count else None
         self.full_survey = False
