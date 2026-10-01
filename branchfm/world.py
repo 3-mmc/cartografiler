@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -50,6 +51,10 @@ def system_name() -> str:
     """The root disk's continent name. Under WSL the Linux root shares the world with the
     Windows drives, and saying which one this is earns the name; installed directly it is
     simply the distribution."""
+    if sys.platform == 'darwin':
+        return 'macOS'
+    if sys.platform == 'win32':
+        return 'Windows'
     if os.path.exists('/usr/lib/wsl') or 'microsoft' in os.uname().release.lower():
         return 'Linux · WSL'
     try:
@@ -758,6 +763,9 @@ class World:
             # The cache key is the shape; statistics (survey state, counts, activity) are
             # always taken fresh from the index.
             self._refresh_stats(fresh, rows)
+        # Host labels are presentation metadata, including in existing layout caches.
+        if parent is None and fresh.node.get('continent'):
+            fresh.node['continent']['name'] = SYSTEM_NAME
         fresh.version = self.index.version
         with self.lock:
             if t is not None and t.sig != fresh.sig:
@@ -792,6 +800,8 @@ class World:
 
     @staticmethod
     def display_name(path: str, name: str) -> str:
+        if path == '/':
+            return SYSTEM_NAME
         parts = path.split('/')
         if len(parts) == 3 and parts[1] == 'mnt' and len(parts[2]) == 1:
             return parts[2].upper()+':'

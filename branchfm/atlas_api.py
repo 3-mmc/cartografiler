@@ -420,7 +420,7 @@ class Atlas:
                     disk_side = next((c['side'] for c in root_t.children if c['path'] == root), 0.2)
                 if 'x' in where:
                     places.append({'path': hit[0], 'name': hit[1], 'size': hit[2], 'x': where['x'], 'y': where['y'],
-                                   'disk': World.display_name(root, root) if root != '/' else 'Linux', 'disk_side': disk_side})
+                                   'disk': World.display_name(root, root), 'disk_side': disk_side})
             with self.index.write_lock:
                 db.execute("INSERT OR REPLACE INTO meta VALUES('monuments', ?)", (json.dumps({'time': time.time(), 'places': places}),))
                 db.commit()

@@ -8,6 +8,14 @@ from branchfm.mounts import _disk_mounts
 
 
 class PlatformTests(unittest.TestCase):
+    def test_system_continent_uses_native_host_name(self):
+        from branchfm import world
+        for platform, name in [('darwin', 'macOS'), ('win32', 'Windows')]:
+            with patch.object(world.sys, 'platform', platform):
+                self.assertEqual(world.system_name(), name)
+                with patch.object(world, 'SYSTEM_NAME', name):
+                    self.assertEqual(world.World.display_name('/', '/'), name)
+
     def test_runtime_does_not_select_another_hosts_binary(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
