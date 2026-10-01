@@ -92,7 +92,7 @@ def main():
                     target = destination/f'{number}-{source.name}'
                     shutil.copy2(source, target)
                     copied.append(str(file))
-        (destination/'METADATA.txt').write_text(str(distribution.metadata))
+        (destination/'METADATA.txt').write_text(distribution.read_text('METADATA') or '')
     python_license = Path(sysconfig.get_path('stdlib'))/'LICENSE.txt'
     if not python_license.is_file():
         raise RuntimeError('Python license missing; use the python.org/setup-python distribution.')
